@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei",
+    "Noto Sans SC", sans-serif;
+}
+
+/* 论文排版模式：尽量接近 Word 效果 */
+.paper-page {
+  background: #fff;
+  font-family: "SimSun", "Songti SC", "Noto Serif SC", serif;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff !important;
+  }
+  .paper-page {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+}

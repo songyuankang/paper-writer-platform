@@ -1,0 +1,29 @@
+{
+  "toc": {
+    "auto": true,
+    "page_numbers": true,
+    "title_numbering": true
+  },
+  "page": {
+    "margins": {
+      "top_cm": 3.0,
+      "bottom_cm": 2.5,
+      "left_cm": 3.0,
+      "right_cm": 2.5
+    }
+  },
+  "reference": {
+    "style": "gb7714",
+    "auto_sort": true,
+    "auto_number": true
+  },
+  "chart": {
+    "numbering": "chapter",
+    "position": "auto",
+    "title_format": "图{chapter}-{index} {title}"
+  },
+  "fonts": {
+    "east_asia": "宋体",
+    "latin": "Times New Roman"
+  }
+}
