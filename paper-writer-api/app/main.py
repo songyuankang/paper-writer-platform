@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.generate import router
 from app.api.history import router as history_router
@@ -61,6 +62,12 @@ app = FastAPI(
     description="paper-writer Skill 的 API 接口层：提交论文生成任务、查询进度、下载结果。",
     version="0.1.0",
     lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 app.include_router(router)
 app.include_router(history_router)

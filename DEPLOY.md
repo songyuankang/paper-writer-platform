@@ -53,3 +53,11 @@ docker compose up -d --build
 5. 部署完成后得到 `https://xxx.vercel.app`，即可公开访问。
 
 仓库里已经包含 `vercel.json` 和 `public/_redirects`，Vercel / Netlify 的 SPA 路由会自动回退到 `index.html`。
+
+## 方式三：Cloudflare Pages + 后端服务器
+
+Cloudflare Pages 可以托管前端静态页面，但这个后端不能直接整个搬到 Cloudflare Workers：它依赖 SQLite、本地 `uploads` / `outputs` 目录、后台长任务，以及 `matplotlib`、`python-docx` 等包。
+
+1. 前端：Cloudflare Pages 连接 GitHub 仓库，Root Directory 填 `paper-writer-web`，构建命令 `npm run build`，输出目录 `dist`，环境变量 `VITE_API_URL=https://api.yourdomain.com`。仓库里的 `public/_redirects` 已处理 SPA 路由。
+2. 后端：用云服务器或 Render / Railway 按 `paper-writer-api/Dockerfile` 部署，得到 `https://api.yourdomain.com`。
+3. 域名：在 Cloudflare DNS 里把 `api` 子域解析到后端服务器。后端已启用 CORS，前端跨域请求可以正常工作。
