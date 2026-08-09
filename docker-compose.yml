@@ -1,0 +1,32 @@
+services:
+  api:
+    build:
+      context: ./paper-writer-api
+    environment:
+      PAPER_WRITER_PORT: "8000"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+    volumes:
+      - paper-uploads:/app/uploads
+      - paper-outputs:/app/outputs
+      - paper-logs:/app/logs
+      - paper-data:/app/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./paper-writer-web
+      args:
+        VITE_API_URL: ${VITE_API_URL:-}
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  paper-uploads:
+  paper-outputs:
+  paper-logs:
+  paper-data:

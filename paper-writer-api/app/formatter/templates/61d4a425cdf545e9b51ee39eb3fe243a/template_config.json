@@ -1,0 +1,217 @@
+{
+  "page": {
+    "page_width_cm": 21.0,
+    "page_height_cm": 29.7,
+    "top_margin_cm": 3.0,
+    "bottom_margin_cm": 3.0,
+    "left_margin_cm": 3.0,
+    "right_margin_cm": 3.0,
+    "header_distance_cm": 1.9,
+    "footer_distance_cm": 1.8,
+    "page_number_format": "upperRoman",
+    "page_number_start": 1,
+    "gutter_cm": 0.0,
+    "header": {
+      "has_content": false,
+      "different_first_page": false
+    },
+    "footer": {
+      "has_content": false,
+      "different_first_page": false
+    }
+  },
+  "fonts": {
+    "default": {
+      "ascii": "Times New Roman",
+      "east_asia": "宋体",
+      "h_ansi": "Times New Roman"
+    }
+  },
+  "styles": {
+    "heading1": {
+      "name": "Heading 1",
+      "font": {
+        "name": "Heading 1",
+        "ascii": null,
+        "east_asia": "黑体",
+        "size_pt": 15.0,
+        "bold": true
+      },
+      "paragraph": {
+        "alignment": null,
+        "line_spacing": 1.5,
+        "space_before_pt": 12.0,
+        "space_after_pt": 12.0,
+        "first_line_indent_pt": null,
+        "outline_level": 0
+      }
+    },
+    "heading2": {
+      "name": "Heading 2",
+      "font": {
+        "name": "Heading 2",
+        "ascii": "Arial",
+        "east_asia": "黑体",
+        "size_pt": 14.0,
+        "bold": true
+      },
+      "paragraph": {
+        "alignment": null,
+        "line_spacing": 1.5,
+        "space_before_pt": 13.0,
+        "space_after_pt": 13.0,
+        "first_line_indent_pt": null,
+        "outline_level": 1
+      }
+    },
+    "heading3": {
+      "name": "Heading 3",
+      "font": {
+        "name": "Heading 3",
+        "ascii": null,
+        "east_asia": "黑体",
+        "size_pt": 12.0,
+        "bold": true
+      },
+      "paragraph": {
+        "alignment": null,
+        "line_spacing": 1.5,
+        "space_before_pt": 8.0,
+        "space_after_pt": 8.0,
+        "first_line_indent_pt": null,
+        "outline_level": 2
+      }
+    },
+    "body": {
+      "name": "Normal",
+      "font": {
+        "name": "Normal",
+        "ascii": null,
+        "east_asia": null,
+        "size_pt": 10.5,
+        "bold": null
+      },
+      "paragraph": {
+        "alignment": "JUSTIFY (3)",
+        "line_spacing": null,
+        "space_before_pt": null,
+        "space_after_pt": null,
+        "first_line_indent_pt": null,
+        "outline_level": null
+      }
+    },
+    "caption": {
+      "name": "Caption",
+      "font": {
+        "name": "Caption",
+        "ascii": "等线 Light",
+        "east_asia": "黑体",
+        "size_pt": 10.0,
+        "bold": null
+      },
+      "paragraph": {
+        "alignment": null,
+        "line_spacing": null,
+        "space_before_pt": null,
+        "space_after_pt": null,
+        "first_line_indent_pt": null,
+        "outline_level": null
+      }
+    },
+    "reference": null,
+    "toc_entries": [
+      "toc 3",
+      "toc 1",
+      "toc 2"
+    ],
+    "table": {
+      "name": "Table Grid"
+    }
+  },
+  "cover": {
+    "detected": true,
+    "fields": [
+      {
+        "keyword": "姓名",
+        "key": "name",
+        "paragraph_index": 12,
+        "text": "学生姓名："
+      },
+      {
+        "keyword": "学院",
+        "key": "college",
+        "paragraph_index": 13,
+        "text": "二级学院：商务信息技术学院"
+      },
+      {
+        "keyword": "班级",
+        "key": "class_name",
+        "paragraph_index": 14,
+        "text": "班级名称："
+      },
+      {
+        "keyword": "指导教师",
+        "key": "advisor",
+        "paragraph_index": 15,
+        "text": "指导教师："
+      },
+      {
+        "keyword": "导师",
+        "key": "advisor",
+        "paragraph_index": 16,
+        "text": "企业导师："
+      },
+      {
+        "keyword": "指导教师",
+        "key": "advisor",
+        "paragraph_index": 23,
+        "text": "本人郑重声明：所呈交的毕业设计是本人在指导教师的指导下，独立进行研究工作所取得的成果，成果不存在知识产权争议，除文中已经注明引用的内容外，本设计不含任何其他个人"
+      }
+    ]
+  },
+  "toc": {
+    "detected": true,
+    "field_paragraphs": [
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+    ]
+  },
+  "compatibility": {
+    "score": 91,
+    "max": 100,
+    "missing": [
+      "参考文献样式/结构",
+      "页眉页脚"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+论文题目：{title}
+专业方向：{major}
+论文类型：{paper_type}
+本章标题：{chapter_title}
+本章目标字数：约 {chapter_words} 字
+写作重点：{focus}
+特殊要求：{special_requirements}
+完整大纲：{outline}
+前文章节摘要：
+{previous_summaries}
+
+请按照系统写作要求，为“{chapter_title}”一章生成完整正文内容：
+- 先输出该章的论述内容（若干段落，段落间空行分隔）
+- 如本章包含小节，使用 "## 小节标题" 标记二级标题，并在其下输出相应内容
+- 不要输出一级标题（章节标题由系统添加）
+- 围绕本章写作重点展开，避免与前面章节内容重复

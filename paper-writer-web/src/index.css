@@ -1,0 +1,176 @@
+@import "tailwindcss";
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+  --color-ink-black: #17191c;
+  --color-paper-white: #ffffff;
+  --color-mist-gray: #f2f2f3;
+  --color-fog-white: #fafafb;
+  --color-slate-gray: #777b86;
+  --color-ash-gray: #979799;
+  --color-smoke-gray: #a3a6af;
+  --color-blush-peach: #fbe1d1;
+  --color-sienna-brown: #5d2a1a;
+  --page-max-width: 1200px;
+  --section-gap: 80px;
+  --radius-cards: 24px;
+  --radius-inputs: 16px;
+  --radius-buttons: 9999px;
+  --shadow-subtle: 0 0 0 1px rgba(4, 23, 43, .05), 0 4px 24px rgba(0, 0, 0, .08);
+}
+
+body {
+  font-family: Inter, "Söhne", ui-sans-serif, system-ui, "PingFang SC", "Microsoft YaHei",
+    "Noto Sans SC", sans-serif;
+  color: #17191c;
+  background: #ffffff;
+}
+
+/* Steep 全局控件基线：页面内 Tailwind 组件共享同一套几何与交互语言。 */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+button {
+  border-radius: var(--radius-buttons);
+  transition: background-color .18s ease, border-color .18s ease, color .18s ease,
+    transform .18s ease, box-shadow .18s ease;
+}
+
+button:not(:disabled):hover {
+  border-color: var(--color-ink-black);
+}
+
+input,
+select,
+textarea {
+  border-color: #ececec;
+  border-radius: var(--radius-inputs);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--color-ink-black) !important;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(251, 225, 209, .85) !important;
+}
+
+/* 统一常见内容容器，保留论文纸张与编辑器的特殊样式。 */
+.min-h-screen.bg-slate-50,
+.min-h-screen.bg-slate-100,
+.min-h-screen.bg-white {
+  background-color: var(--color-paper-white);
+}
+
+.rounded-xl.border,
+.rounded-2xl.border,
+.rounded-3xl {
+  border-radius: var(--radius-cards);
+}
+
+.bg-indigo-600,
+.bg-indigo-500,
+.bg-blue-600,
+.bg-emerald-500,
+.bg-green-500,
+.bg-amber-500 {
+  background-color: var(--color-ink-black) !important;
+}
+
+.text-indigo-600,
+.text-blue-600,
+.text-emerald-600,
+.text-green-600 {
+  color: var(--color-sienna-brown) !important;
+}
+
+.border-indigo-300,
+.border-indigo-500,
+.border-blue-200,
+.border-emerald-200 {
+  border-color: #e7d5ca !important;
+}
+
+h1, h2, .font-serif {
+  font-family: "Source Serif 4", "Noto Serif SC", ui-serif, Georgia, serif;
+}
+
+h1,
+h2 {
+  font-weight: 400;
+  letter-spacing: -0.03em;
+}
+
+h1 { line-height: 1.2; }
+h2 { line-height: 1.3; }
+
+/* 旧页面语义色映射到首页的中性暖色系统。 */
+.border-slate-100,
+.border-slate-200,
+.border-neutral-200,
+.border-neutral-300 {
+  border-color: #ececec !important;
+}
+
+.bg-slate-50,
+.bg-slate-100,
+.bg-neutral-50,
+.bg-neutral-100 {
+  background-color: var(--color-fog-white) !important;
+}
+
+.bg-amber-50,
+.bg-yellow-50 {
+  background-color: var(--color-blush-peach) !important;
+}
+
+.text-slate-800,
+.text-slate-900,
+.text-neutral-900 {
+  color: var(--color-ink-black) !important;
+}
+
+.text-slate-500,
+.text-slate-600,
+.text-neutral-500,
+.text-neutral-600,
+.text-neutral-700 {
+  color: var(--color-slate-gray) !important;
+}
+
+.text-slate-400,
+.text-neutral-400 {
+  color: var(--color-ash-gray) !important;
+}
+
+.shadow-sm,
+.shadow-md {
+  box-shadow: var(--shadow-subtle) !important;
+}
+
+/* 论文排版模式：尽量接近 Word 效果 */
+.paper-page {
+  background: #fff;
+  font-family: "SimSun", "Songti SC", "Noto Serif SC", serif;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff !important;
+  }
+  .paper-page {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+}

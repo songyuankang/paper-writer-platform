@@ -1,0 +1,101 @@
+{
+  "page": {
+    "page_width_cm": 21.0,
+    "page_height_cm": 29.7,
+    "top_margin_cm": 2.5,
+    "bottom_margin_cm": 2.5,
+    "left_margin_cm": 2.0,
+    "right_margin_cm": 2.0,
+    "header_distance_cm": 1.5,
+    "footer_distance_cm": 1.75,
+    "page_number_format": "upperRoman",
+    "page_number_start": null,
+    "gutter_cm": 0.0,
+    "header": {
+      "has_content": true,
+      "different_first_page": false
+    },
+    "footer": {
+      "has_content": true,
+      "different_first_page": false
+    }
+  },
+  "fonts": {
+    "default": {
+      "ascii": "Cambria",
+      "east_asia": "ＭＳ 明朝",
+      "h_ansi": "Cambria",
+      "size_pt": 11.0
+    }
+  },
+  "styles": {
+    "heading1": null,
+    "heading2": null,
+    "heading3": null,
+    "body": {
+      "name": "Normal",
+      "font": {
+        "name": "Normal",
+        "ascii": "Cambria",
+        "east_asia": "ＭＳ 明朝",
+        "size_pt": 11.0,
+        "bold": null
+      },
+      "paragraph": {
+        "alignment": "LEFT (0)",
+        "line_spacing": 1.15,
+        "space_before_pt": null,
+        "space_after_pt": 10.0,
+        "first_line_indent_pt": null,
+        "outline_level": null
+      }
+    },
+    "caption": {
+      "name": "Caption",
+      "font": {
+        "name": "Caption",
+        "ascii": null,
+        "east_asia": null,
+        "size_pt": 9.0,
+        "bold": true,
+        "color": "4F81BD"
+      },
+      "paragraph": {
+        "alignment": null,
+        "line_spacing": 1.0,
+        "space_before_pt": null,
+        "space_after_pt": null,
+        "first_line_indent_pt": null,
+        "outline_level": null
+      }
+    },
+    "reference": null,
+    "toc_entries": [
+      "TOC 3",
+      "TOC 4",
+      "TOC 5"
+    ],
+    "table": {
+      "name": "Table Grid"
+    }
+  },
+  "cover": {
+    "detected": true,
+    "fields": []
+  },
+  "toc": {
+    "detected": false,
+    "field_paragraphs": []
+  },
+  "compatibility": {
+    "score": 64,
+    "max": 100,
+    "missing": [
+      "一级标题样式",
+      "二级标题样式",
+      "三级标题样式",
+      "目录域（TOC field）",
+      "封面字段数量≥6"
+    ]
+  }
+}
