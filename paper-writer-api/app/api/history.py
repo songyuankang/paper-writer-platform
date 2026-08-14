@@ -1,6 +1,6 @@
 """论文生成记录接口。"""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from app.services import history_service
 
@@ -23,9 +23,12 @@ def history_detail(task_id: str) -> dict:
 
 
 @router.delete("/history/{task_id}")
-def history_delete(task_id: str) -> dict:
+def history_delete(task_id: str, request: Request) -> dict:
     """删除记录及其生成文件、图表文件、上传模板。"""
     deleted = history_service.delete_record(task_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"记录不存在: {task_id}")
+    # history_service 已删除持久化文件；同时清除 TaskManager 内存缓存，
+    # 确保 /api/status/{task_id} 立即返回 404，前端才能清掉旧进度条。
+    request.app.state.task_manager.remove(task_id)
     return {"deleted": task_id}

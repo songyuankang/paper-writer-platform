@@ -1,5 +1,10 @@
+import { useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 import ProgressBar from "../components/ProgressBar";
+import EditorModalShell from "../components/EditorModalShell";
+import TemplateManagerModal from "../components/TemplateManagerModal";
+import HistoryPage from "./History";
+import SettingsModels from "./SettingsModels";
 import {
   CreateWizardProvider,
   STEPS,
@@ -17,9 +22,12 @@ function CreateLayoutContent() {
     task,
     progress,
     step,
-    activeStep,
     stepBadge,
   } = useCreateWizard();
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [historyPreviewTaskId, setHistoryPreviewTaskId] = useState<string | null>(null);
 
   if (isBodyPage) {
     return <Outlet />;
@@ -43,24 +51,15 @@ function CreateLayoutContent() {
             </span>
           </div>
           <nav className="flex items-center gap-2 text-sm">
-            <Link
-              to="/templates"
+            <button type="button" onClick={() => setTemplateManagerOpen(true)}
               className="rounded-lg px-3 py-1.5 text-slate-600 transition hover:bg-slate-100"
-            >
-              模板管理
-            </Link>
-            <Link
-              to="/history"
+            >模板管理</button>
+            <button type="button" onClick={() => setHistoryOpen(true)}
               className="rounded-lg px-3 py-1.5 text-slate-600 transition hover:bg-slate-100"
-            >
-              历史记录
-            </Link>
-            <Link
-              to="/settings/models"
+            >历史记录</button>
+            <button type="button" onClick={() => setModelSettingsOpen(true)}
               className="rounded-lg px-3 py-1.5 text-slate-600 transition hover:bg-slate-100"
-            >
-              模型设置
-            </Link>
+            >模型设置</button>
           </nav>
         </div>
       </header>
@@ -68,7 +67,8 @@ function CreateLayoutContent() {
       <main className="mx-auto max-w-5xl px-4 py-8">
         <div className="mb-8 grid grid-cols-4 gap-2">
           {STEPS.map((s) => {
-            const isActive = s.num === activeStep || s.num === step;
+            // 以当前路由为准，避免已完成任务的 progress=100 覆盖当前页面步骤。
+            const isActive = s.num === step;
             return (
               <div
                 key={s.num}
@@ -121,6 +121,48 @@ function CreateLayoutContent() {
           <Outlet />
         </div>
       </main>
+      <TemplateManagerModal
+        open={templateManagerOpen}
+        onClose={() => setTemplateManagerOpen(false)}
+      />
+      <EditorModalShell
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        title="历史记录"
+        description="查看、筛选、导出或重新生成任务，不离开创建向导。"
+      >
+        <HistoryPage
+          embedded
+          onOpenPreview={(taskId) => {
+            setHistoryOpen(false);
+            setHistoryPreviewTaskId(taskId);
+          }}
+        />
+      </EditorModalShell>
+      <EditorModalShell
+        open={modelSettingsOpen}
+        onClose={() => setModelSettingsOpen(false)}
+        title="模型设置"
+        description="管理写作模型配置，不离开当前创建向导。"
+        className="max-w-[1120px]"
+      >
+        <SettingsModels embedded />
+      </EditorModalShell>
+      <EditorModalShell
+        open={historyPreviewTaskId !== null}
+        onClose={() => setHistoryPreviewTaskId(null)}
+        title="历史论文预览"
+        description="在当前创建向导的弹窗中查看历史论文。"
+        className="max-w-[1200px]"
+      >
+        {historyPreviewTaskId && (
+          <iframe
+            title="历史论文预览"
+            src={`/preview/${historyPreviewTaskId}`}
+            className="h-[72vh] w-full rounded-lg border border-slate-200 bg-white"
+          />
+        )}
+      </EditorModalShell>
     </div>
   );
 }

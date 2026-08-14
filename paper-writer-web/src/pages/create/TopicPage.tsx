@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
+import { generateTopicSuggestions } from "../../api/paper";
 import {
   DISCIPLINES,
   MATERIAL_KIND_OPTIONS,
@@ -8,6 +10,12 @@ import {
 } from "./CreateWizardContext";
 
 export default function TopicPage() {
+  const [customWords, setCustomWords] = useState("");
+  const [customMode, setCustomMode] = useState(false);
+  const [topicModalOpen, setTopicModalOpen] = useState(false);
+  const [selectedTopic, setSelectedTopic] = useState("");
+  const [topicLoading, setTopicLoading] = useState(false);
+  const [topicPrompt, setTopicPrompt] = useState("");
   const {
     paperType,
     setPaperType,
@@ -31,10 +39,6 @@ export default function TopicPage() {
     setMaterialKinds,
     uploadError,
     setUploadError,
-    templates,
-    templateId,
-    setTemplateId,
-    templateDetail,
     models,
     modelId,
     setModelId,
@@ -42,12 +46,34 @@ export default function TopicPage() {
     submitting,
     typeDef,
     majorsOf,
-    recommendTopic,
+    getRecommendedTopics,
     addMaterialFiles,
     removeMaterialFile,
     formatSize,
     handleNext,
   } = useCreateWizard();
+
+  const [recommendedTopics, setRecommendedTopics] = useState<string[]>([]);
+
+  async function openTopicSuggestions(prompt = topicPrompt) {
+    setTopicModalOpen(true);
+    setSelectedTopic("");
+    setTopicLoading(true);
+    try {
+      const result = await generateTopicSuggestions({
+        discipline,
+        major,
+        paper_type: paperType,
+        model_id: modelId || undefined,
+        prompt: prompt.trim() || undefined,
+      });
+      setRecommendedTopics(result.topics);
+    } catch {
+      setRecommendedTopics(getRecommendedTopics());
+    } finally {
+      setTopicLoading(false);
+    }
+  }
 
   return (
     <div className="space-y-5">
@@ -59,8 +85,8 @@ export default function TopicPage() {
             onClick={() => setPaperType(t.value)}
             className={`rounded-xl border p-4 text-left transition ${
               paperType === t.value
-                ? "border-black bg-white ring-2 ring-neutral-200"
-                : "border-neutral-200 bg-white hover:border-black"
+                ? "border-black bg-white shadow-[0_0_0_1px_rgba(23,25,28,.08),0_14px_24px_-16px_rgba(23,25,28,.35)] ring-2 ring-[#fbe1d1]"
+                : "border-neutral-200 bg-white hover:-translate-y-1 hover:border-black hover:bg-[#f2f2f3] hover:shadow-[0_0_0_1px_rgba(23,25,28,.05),0_14px_24px_-12px_rgba(23,25,28,.18)]"
             }`}
           >
             <div className="text-sm font-bold text-slate-800">{t.label}</div>
@@ -72,63 +98,7 @@ export default function TopicPage() {
             </p>
           </button>
         ))}
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-sm font-medium text-slate-700">
-          论文模板
-        </label>
-        <div className="grid gap-2 sm:grid-cols-3">
-          {templates.map((t) => (
-            <button
-              type="button"
-              key={t.id}
-              onClick={() => setTemplateId(t.id)}
-              className={`rounded-xl border p-3 text-left transition ${
-                templateId === t.id
-                  ? "border-black bg-white ring-2 ring-neutral-200"
-                  : "border-neutral-200 bg-white hover:border-black"
-              }`}
-            >
-              <div className="flex items-center gap-1.5">
-                <span
-                  className={`h-3 w-3 shrink-0 rounded-full border ${
-                    templateId === t.id
-                      ? "border-black bg-black"
-                      : "border-neutral-300"
-                  }`}
-                />
-                <span className="truncate text-sm font-semibold text-slate-800">
-                  {t.name}
-                </span>
-                {t.is_default && (
-                  <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-                    默认
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500">
-                {t.description}
-              </p>
-            </button>
-          ))}
-        </div>
-        {templateDetail && (
-          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-            <span>纸张：{templateDetail.page.size}</span>
-            <span>目录：{templateDetail.toc.enabled ? "支持" : "不支持"}</span>
-            <span>
-              标题编号：
-              {templateDetail.numbering.enabled ? "支持" : "不支持"}
-            </span>
-            <span>
-              参考文献：{templateDetail.reference_style.toUpperCase()}
-            </span>
-          </div>
-        )}
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
+      </div>      <div className="grid gap-4 sm:grid-cols-2">
         <div>
           <label className="mb-1.5 block text-sm font-medium text-slate-700">
             学科门类
@@ -182,7 +152,7 @@ export default function TopicPage() {
         />
         <button
           type="button"
-          onClick={recommendTopic}
+          onClick={() => void openTopicSuggestions()}
           className="mt-2 rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-xs font-medium text-neutral-700 transition hover:bg-neutral-100"
         >
           ✨ 推荐选题
@@ -199,7 +169,10 @@ export default function TopicPage() {
               <button
                 type="button"
                 key={w}
-                onClick={() => setWordCount(w)}
+                onClick={() => {
+                  setCustomMode(false);
+                  setWordCount(w);
+                }}
                 className={`rounded-lg border px-3 py-1.5 text-sm transition ${
                   wordCount === w
                     ? "border-black bg-black font-semibold text-white"
@@ -209,6 +182,43 @@ export default function TopicPage() {
                 {w.toLocaleString()}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => {
+                setCustomMode(true);
+                setCustomWords(String(wordCount));
+              }}
+              className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+                customMode
+                  ? "border-black bg-black font-semibold text-white"
+                  : "border-neutral-300 text-neutral-600 hover:border-black"
+              }`}
+            >
+              自定义
+            </button>
+            {customMode && (
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1000}
+                  max={100000}
+                  step={500}
+                  value={customWords}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setCustomWords(raw);
+                    const value = Number(raw);
+                    if (Number.isFinite(value) && value >= 1000 && value <= 100000) {
+                      setWordCount(Math.round(value));
+                    }
+                  }}
+                  className="w-32 rounded-lg border border-neutral-300 px-3 py-1.5 text-sm"
+                  placeholder="输入字数"
+                  aria-label="自定义全文字数"
+                />
+                <span className="text-xs text-slate-500">字（1000–100000）</span>
+              </div>
+            )}
           </div>
         </div>
         <div>
@@ -376,6 +386,22 @@ export default function TopicPage() {
           {submitting ? "提交中…" : "下一步"}
         </button>
       </div>
+
+      {topicModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4 py-6">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-[#f8faff] p-6 shadow-[0_8px_40px_rgba(0,0,0,.18)] sm:p-8">
+            <div className="flex items-start justify-between gap-4">
+              <div><h2 className="text-xl font-semibold text-[#17191c]">请选择一个最优的论文选题</h2><p className="mt-1 text-sm text-slate-500">选择后会自动填入选题框，你也可以重新生成一组建议。</p></div>
+              <button type="button" onClick={() => setTopicModalOpen(false)} className="rounded-full px-2 text-2xl leading-none text-slate-400 hover:bg-white hover:text-[#17191c]" aria-label="关闭">×</button>
+            </div>
+            <div className="mt-6 flex gap-2 rounded-xl bg-[#e9edf3] p-2"><textarea value={topicPrompt} onChange={(e) => setTopicPrompt(e.target.value)} rows={1} placeholder="可输入选题方向或导师给定的选题要求" className="min-h-10 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm outline-none focus:shadow-none"/><button type="button" disabled={topicLoading} onClick={() => void openTopicSuggestions()} className="shrink-0 rounded-lg bg-black px-4 py-2 text-xs font-medium text-white disabled:opacity-50">{topicLoading ? "生成中…" : "重新生成"}</button></div>
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
+              {topicLoading ? <div className="col-span-full py-10 text-center text-sm text-slate-500">AI 正在生成 8 个推荐选题…</div> : recommendedTopics.map((candidate) => <button key={candidate} type="button" onClick={() => setSelectedTopic(candidate)} className={`flex items-start gap-2 rounded-xl border p-4 text-left text-sm leading-6 transition ${selectedTopic === candidate ? "border-black bg-white shadow-[0_0_0_2px_#fbe1d1]" : "border-transparent bg-[#e9edf3] hover:-translate-y-0.5 hover:bg-white hover:shadow-sm"}`}><span className={`mt-1.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${selectedTopic === candidate ? "border-black bg-black" : "border-slate-400"}`}><span className="h-1.5 w-1.5 rounded-full bg-white" /></span><span className="min-w-0 flex-1">{candidate}</span></button>)}
+            </div>
+            <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => { setSelectedTopic(""); setTopicModalOpen(false); }} className="rounded-full border border-neutral-300 bg-white px-5 py-2 text-sm text-slate-600 hover:border-black">取消</button><button type="button" disabled={!selectedTopic} onClick={() => { setTopic(selectedTopic); setSelectedTopic(""); setTopicModalOpen(false); }} className="rounded-full bg-black px-5 py-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-40">确认选题</button></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

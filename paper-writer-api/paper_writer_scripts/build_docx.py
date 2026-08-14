@@ -135,12 +135,14 @@ def add_title_block(doc, meta):
 
 
 def add_abstract(doc, meta):
-    if meta.get("abstract"):
+    """渲染中英文摘要与关键词；默认构建器和模板渲染器保持一致。"""
+    abstract = str(meta.get("abstract") or "").strip()
+    keywords = meta.get("keywords") or []
+    if abstract:
         add_para(doc, "摘  要", cn="黑体", size=15, bold=True,
                  align=CENTER, line_spacing=1.25, before=6, after=6)
-        add_para(doc, meta["abstract"], cn="宋体", size=12,
+        add_para(doc, abstract, cn="宋体", size=12,
                  indent_pt=24, line_spacing=1.5)
-    keywords = meta.get("keywords") or []
     if keywords:
         p = doc.add_paragraph()
         pf = p.paragraph_format
@@ -148,11 +150,30 @@ def add_abstract(doc, meta):
         pf.space_before = Pt(6)
         label = p.add_run("关键词：")
         set_run_font(label, cn_font="黑体", size=12, bold=True)
-        body = p.add_run("；".join(keywords))
+        body = p.add_run("；".join(str(item) for item in keywords))
         set_run_font(body, cn_font="宋体", size=12)
+
+    abstract_en = str(meta.get("abstract_en") or "").strip()
+    keywords_en = meta.get("keywords_en") or []
+    if abstract_en:
+        # 英文摘要独立成页，确保位于目录之前且不与中文摘要混排。
+        if abstract or keywords:
+            doc.add_page_break()
+        add_para(doc, "Abstract", cn="Times New Roman", size=15, bold=True,
+                 align=CENTER, line_spacing=1.25, before=6, after=6)
+        add_para(doc, abstract_en, cn="Times New Roman", size=12,
+                 indent_pt=0, line_spacing=1.5)
+        if keywords_en:
+            p = doc.add_paragraph()
+            pf = p.paragraph_format
+            pf.line_spacing = 1.5
+            pf.space_before = Pt(6)
+            label = p.add_run("Keywords: ")
+            set_run_font(label, cn_font="Times New Roman", size=12, bold=True)
+            body = p.add_run("; ".join(str(item) for item in keywords_en))
+            set_run_font(body, cn_font="Times New Roman", size=12)
     if meta.get("abstract_page_break"):
         doc.add_page_break()
-
 
 def add_heading(doc, text, level):
     conf = {1: (16, 12, 12), 2: (14, 6, 6), 3: (12, 6, 6)}.get(level, (12, 6, 6))

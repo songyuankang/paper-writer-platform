@@ -43,7 +43,7 @@ const EMPTY_FORM: FormState = {
   enabled: true,
 };
 
-export default function SettingsModels() {
+export default function SettingsModels({ embedded = false }: { embedded?: boolean }) {
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -181,8 +181,9 @@ export default function SettingsModels() {
     "w-full rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm outline-none focus:border-black focus:ring-2 focus:ring-neutral-200";
 
   return (
-    <div className="min-h-screen bg-white px-4 py-8">
-      <div className="mx-auto w-full max-w-5xl">
+    <div className={embedded ? "min-h-0 bg-white px-0 py-0" : "min-h-screen bg-white px-4 py-8"}>
+      <div className={embedded ? "w-full" : "mx-auto w-full max-w-5xl"}>
+        {!embedded && (
         <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-slate-800">AI 模型配置</h1>
@@ -206,6 +207,23 @@ export default function SettingsModels() {
             </button>
           </div>
         </header>
+        )}
+
+        {embedded && (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-800">模型列表</p>
+              <p className="mt-0.5 text-xs text-slate-500">添加并测试新的 OpenAI 兼容模型，无需离开编辑页。</p>
+            </div>
+            <button
+              type="button"
+              onClick={openCreate}
+              className="rounded-lg bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-700"
+            >
+              + 添加新模型
+            </button>
+          </div>
+        )}
 
         {message && (
           <div

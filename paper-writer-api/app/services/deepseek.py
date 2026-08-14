@@ -160,12 +160,16 @@ def chat_with(base_url: str, api_key: str, model: str,
     raise DeepSeekServerError("DeepSeek 调用失败")
 
 
-def chat(messages: list[dict]) -> str:
-    """使用当前统一模型连接的非流式对话。"""
+def chat(messages: list[dict], *, max_tokens: int | None = None) -> str:
+    """使用当前统一模型连接的非流式对话。
+
+    :param max_tokens: 覆盖模型配置的 token 上限；不传时使用模型配置值。
+    """
     cfg = _current()
     return chat_with(
         cfg["base_url"], cfg["api_key"], cfg["model"], messages,
-        temperature=cfg["temperature"], max_tokens=cfg["max_tokens"])
+        temperature=cfg["temperature"],
+        max_tokens=max_tokens or cfg["max_tokens"])
 
 
 def chat_stream_with(base_url: str, api_key: str, model: str,

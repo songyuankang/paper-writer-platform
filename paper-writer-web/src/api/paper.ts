@@ -25,8 +25,6 @@ export interface GenerateParams {
   references?: string[];
   /** 草稿模式：只构建大纲草稿（逐段生成编辑器用） */
   draft_mode?: boolean;
-  /** 排版模板 id（如 basic-general-thesis）；不传使用后端默认模板 */
-  template_id?: string;
 }
 
 export interface OutlineChapter {
@@ -188,9 +186,6 @@ export async function generatePaper(
   }
   if (params.draft_mode) {
     form.append("draft_mode", "true");
-  }
-  if (params.template_id) {
-    form.append("template_id", params.template_id);
   }
 
   const res = await fetch(`${API_BASE}/api/generate`, {
@@ -462,6 +457,22 @@ export async function generateOutline(params: {
   return res.json();
 }
 
+export async function generateTopicSuggestions(params: {
+  discipline?: string;
+  major: string;
+  paper_type: string;
+  model_id?: string;
+  prompt?: string;
+}): Promise<{ topics: string[] }> {
+  const res = await fetch(`${API_BASE}/api/topics/suggest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw await toError(res);
+  return (await res.json()) as { topics: string[] };
+}
+
 /** 独立生成论文摘要与关键词（创作向导第②步，"新建一条"按钮）。 */
 export async function generateAbstract(params: {
   title: string;
@@ -527,6 +538,8 @@ export interface DraftSection {
   level: number;
   gist: string;
   paragraphs: DraftParagraph[];
+  target_chars?: number;
+  min_chars?: number;
 }
 
 export interface PaperDraft {
@@ -548,6 +561,14 @@ export interface PaperDraft {
   progress: number;
   done: number;
   total: number;
+  word_status?: "generating" | "supplementing" | "completed" | "shortfall";
+  supplement_rounds?: number;
+  word_stats?: {
+    target: number;
+    minimum: number;
+    actual: number;
+    shortfall: number;
+  };
 }
 
 async function draftFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -637,6 +658,7 @@ export const startDraftOneclick = (
     body: JSON.stringify({ model_id: modelId }),
   });
 
+
 export const generateDraftAck = (
   taskId: string,
   modelId?: string,
@@ -659,8 +681,19 @@ export const generateDraftEnAbstract = (
 
 export const exportDraft = (
   taskId: string,
+  templateId?: string,
 ): Promise<{ ok: boolean; files: string[] }> =>
-  draftFetch(`/api/draft/${taskId}/export`, { method: "POST" });
+  draftFetch(`/api/draft/${taskId}/export${templateId ? `?template_id=${encodeURIComponent(templateId)}` : ""}`, { method: "POST" });
+
+/** 按选定排版模板导出论文 docx（未传 template_id 时后端使用默认基础模板）。 */
+export const exportPaper = (
+  taskId: string,
+  templateId?: string,
+): Promise<{ ok: boolean; files: string[] }> =>
+  postJson(
+    `/api/export/${taskId}${templateId ? `?template_id=${encodeURIComponent(templateId)}` : ""}`,
+    {},
+  );
 
 export async function fetchTaskStatus(taskId: string): Promise<TaskInfo> {
   const res = await fetch(`${API_BASE}/api/status/${taskId}`);
@@ -959,12 +992,12 @@ export function formatDownloadUrl(formatId: string, file?: string): string {
 }
 
 export async function fetchFormatTemplates(): Promise<FormatTemplate[]> {
-  const res = await fetch(`${API_BASE}/api/format/templates`);
+  const res = await fetch(`${API_BASE}/api/templates`);
   if (!res.ok) {
     throw await toError(res);
   }
-  const data = (await res.json()) as { templates: FormatTemplate[] };
-  return data.templates;
+  const data = (await res.json()) as { items: FormatTemplate[] };
+  return data.items;
 }
 
 export async function uploadFormatTemplate(

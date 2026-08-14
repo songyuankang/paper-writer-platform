@@ -64,6 +64,8 @@ def _extract_config(docx_path: Path) -> dict:
         "styles": profile.get("styles", {}),
         "cover": profile.get("cover", {}),
         "toc": profile.get("toc", {}),
+        "tables": profile.get("tables", []),
+        "sections": profile.get("sections", []),
         "compatibility": profile.get("compatibility", {}),
     }
 

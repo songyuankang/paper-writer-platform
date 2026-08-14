@@ -3,12 +3,14 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   deleteHistoryRecord,
   downloadUrl,
+  exportPaper,
   fetchHistory,
   fetchHistoryRecord,
   fetchTaskStatus,
   generatePaper,
   type HistoryRecord,
 } from "../api/paper";
+import TemplateManagerModal from "../components/TemplateManagerModal";
 
 type StatusFilter = "all" | "active" | "completed" | "failed";
 
@@ -34,7 +36,13 @@ function statusBadge(status: string): { label: string; cls: string } {
   }
 }
 
-export default function HistoryPage() {
+export default function HistoryPage({
+  embedded = false,
+  onOpenPreview,
+}: {
+  embedded?: boolean;
+  onOpenPreview?: (taskId: string) => void;
+}) {
   const navigate = useNavigate();
   const [records, setRecords] = useState<HistoryRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,6 +50,26 @@ export default function HistoryPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  const [exportTaskId, setExportTaskId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  /** 导出：选择模板 → 后端按模板渲染 → 下载 docx。 */
+  async function handleExport(templateId: string) {
+    const taskId = exportTaskId;
+    if (!taskId) {
+      return;
+    }
+    setExportTaskId(null);
+    setExporting(true);
+    try {
+      await exportPaper(taskId, templateId);
+      window.location.href = downloadUrl(taskId, "论文.docx");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "导出失败");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   async function refresh() {
     try {
@@ -124,7 +152,7 @@ export default function HistoryPage() {
           if (info.status === "completed" || info.status === "failed") {
             window.clearInterval(timer);
             if (info.status === "completed") {
-              navigate(`/preview/${task_id}`);
+              if (!embedded) navigate(`/preview/${task_id}`);
             } else {
               window.alert(`重新生成失败：${info.error ?? "未知错误"}`);
               setRegeneratingId(null);
@@ -142,8 +170,9 @@ export default function HistoryPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white px-4 py-8">
-      <div className="mx-auto w-full max-w-5xl">
+    <div className={embedded ? "min-h-0 bg-white px-0 py-0" : "min-h-screen bg-white px-4 py-8"}>
+      <div className={embedded ? "w-full" : "mx-auto w-full max-w-5xl"}>
+        {!embedded && (
         <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-slate-800">论文生成记录</h1>
@@ -158,6 +187,7 @@ export default function HistoryPage() {
             + 去生成论文
           </Link>
         </header>
+        )}
 
         {/* 搜索与筛选 */}
         <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -193,9 +223,11 @@ export default function HistoryPage() {
         ) : filtered.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-300 bg-white py-14 text-center">
             <p className="text-slate-400">暂无符合条件的生成记录</p>
-            <Link to="/create" className="mt-2 inline-block text-sm text-neutral-600 hover:text-black">
-              去生成第一篇论文
-            </Link>
+            {!embedded && (
+              <Link to="/create" className="mt-2 inline-block text-sm text-neutral-600 hover:text-black">
+                去生成第一篇论文
+              </Link>
+            )}
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -233,27 +265,31 @@ export default function HistoryPage() {
                     </p>
                   )}
                   <div className="mt-auto grid grid-cols-2 gap-1.5 pt-2">
-                    <Link
-                      to={`/preview/${record.task_id}`}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (embedded) {
+                          onOpenPreview?.(record.task_id);
+                        } else {
+                          navigate(`/create/body?task=${record.task_id}`);
+                        }
+                      }}
                       className="rounded-lg bg-black py-1.5 text-center text-sm font-medium text-white hover:bg-neutral-700"
                     >
-                      预览
-                    </Link>
-                    <a
-                      href={downloadUrl(record.task_id, "论文.docx")}
+                      {embedded ? "查看" : "编辑"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!done || exporting}
+                      onClick={() => setExportTaskId(record.task_id)}
                       className={`rounded-lg border py-1.5 text-center text-sm font-medium transition ${
                         done
                           ? "border-neutral-300 text-neutral-700 hover:bg-neutral-100"
                           : "cursor-not-allowed border-slate-200 text-slate-300"
                       }`}
-                      onClick={(e) => {
-                        if (!done) {
-                          e.preventDefault();
-                        }
-                      }}
                     >
-                      下载
-                    </a>
+                      {exporting ? "导出中…" : "下载"}
+                    </button>
                     <button
                       type="button"
                       disabled={regeneratingId !== null}
@@ -278,6 +314,13 @@ export default function HistoryPage() {
           </div>
         )}
       </div>
+
+      <TemplateManagerModal
+        open={exportTaskId !== null}
+        onClose={() => setExportTaskId(null)}
+        selectMode
+        onSelectTemplate={(id) => void handleExport(id)}
+      />
     </div>
   );
 }

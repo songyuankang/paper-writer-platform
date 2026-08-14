@@ -297,6 +297,50 @@ def parse_preview(task_dir: Path, request: dict | None = None) -> dict:
     }
 
 
+def parse_draft_preview(task_dir: Path, request: dict | None = None) -> dict:
+    """预览创作向导直接生成的 draft.json（尚未导出 DOCX）。"""
+    draft_path = task_dir / "draft.json"
+    draft = json.loads(draft_path.read_text(encoding="utf-8"))
+    request = request or {}
+    chapters = []
+    word_count = 0
+    for section in draft.get("sections", []):
+        paragraphs = [str(p.get("text") or "").strip()
+                      for p in section.get("paragraphs", [])]
+        paragraphs = [p for p in paragraphs if p]
+        word_count += sum(len(p) for p in paragraphs)
+        blocks = [{"type": "p", "text": p} for p in paragraphs]
+        content = "".join(f"<p>{html.escape(p)}</p>" for p in paragraphs)
+        chapters.append({
+            "id": section.get("id", section.get("number", "section")),
+            "level": int(section.get("level", 2)),
+            "number": section.get("number", ""),
+            "title": section.get("title", ""),
+            "content": content,
+            "blocks": blocks,
+            "images": [],
+        })
+    refs = list(draft.get("references") or [])
+    meta = draft.get("meta") or {}
+    return {
+        "title": draft.get("title") or request.get("title") or "论文草稿",
+        "metadata": {
+            "word_count": word_count,
+            "target_word_count": meta.get("word_count", 0),
+            "chart_count": 0,
+            "reference_count": len(refs),
+            "format_check": "未导出 DOCX",
+            "major": meta.get("major", ""),
+            "paper_type": meta.get("paper_type", ""),
+            "reference_style": meta.get("reference_style", ""),
+            "template": False,
+            "special_requirements": meta.get("special_requirements"),
+        },
+        "chapters": chapters,
+        "references": refs,
+    }
+
+
 def _slug(text: str) -> str:
     slug = re.sub(r"[^\w\u4e00-\u9fff]+", "-", text).strip("-")
     return slug[:40]

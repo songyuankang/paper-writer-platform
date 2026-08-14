@@ -120,6 +120,37 @@ def style_para_info(style):
     return info
 
 
+def paragraph_style_info(paragraph):
+    """Return the effective direct formatting of one representative paragraph.
+
+    Many school templates put every paragraph in ``Normal`` and apply the real
+    typography directly to runs/paragraphs.  Reading only styles.xml therefore
+    loses the visible template format.
+    """
+    run = next((r for r in paragraph.runs if r.text), None)
+    font = {"name": paragraph.style.name if paragraph.style else None,
+            "ascii": run.font.name if run else None,
+            "east_asia": None,
+            "size_pt": run.font.size.pt if run and run.font.size else None,
+            "bold": run.bold if run else None}
+    if run is not None and run._element.rPr is not None:
+        rfonts = run._element.rPr.rFonts
+        if rfonts is not None:
+            font["east_asia"] = rfonts.get(qn("w:eastAsia"))
+    pf = paragraph.paragraph_format
+    para = {
+        "alignment": str(paragraph.alignment) if paragraph.alignment is not None else None,
+        "line_spacing": (pf.line_spacing.pt if hasattr(pf.line_spacing, "pt")
+                         else pf.line_spacing),
+        "space_before_pt": pf.space_before.pt if pf.space_before else None,
+        "space_after_pt": pf.space_after.pt if pf.space_after else None,
+        "first_line_indent_pt": (pf.first_line_indent.pt
+                                 if pf.first_line_indent else None),
+        "outline_level": read_outline_level(paragraph._p),
+    }
+    return {"name": font["name"], "font": font, "paragraph": para}
+
+
 def doc_defaults(doc):
     """Read w:docDefaults (rPrDefault/pPrDefault) from styles.xml."""
     out = {"font": {}, "paragraph": {}}
@@ -315,6 +346,56 @@ def compute_compatibility(profile):
     return {"score": score, "max": total, "missing": missing}
 
 
+def extract_table_layouts(doc):
+    """Extract reusable table layout metadata without treating cell values as data.
+
+    The first row is retained only as a column-header hint.  All remaining
+    source cell content is deliberately excluded so later paper generation
+    cannot accidentally copy or fabricate template data.
+    """
+    layouts = []
+    for ordinal, table in enumerate(doc.tables, start=1):
+        rows = list(table.rows)
+        first_row = rows[0].cells if rows else []
+        headers = [(cell.text or "").strip() for cell in first_row]
+        widths_cm = []
+        for cell in first_row:
+            width = getattr(cell, "width", None)
+            widths_cm.append(round(width / 360000, 3) if width else None)
+        layouts.append({
+            "key": f"table_{ordinal}",
+            "ordinal": ordinal,
+            "row_count": len(rows),
+            "column_count": len(first_row),
+            "headers": headers,
+            "column_widths_cm": widths_cm,
+            "style": getattr(getattr(table, "style", None), "name", None),
+        })
+    return layouts
+
+
+def extract_section_layouts(doc):
+    """Extract section-level page, header and footer settings from DOCX."""
+    layouts = []
+    for ordinal, section in enumerate(doc.sections, start=1):
+        page = page_info(section)
+        header = "\n".join(
+            p.text.strip() for p in section.header.paragraphs if p.text.strip()
+        )
+        footer = "\n".join(
+            p.text.strip() for p in section.footer.paragraphs if p.text.strip()
+        )
+        layouts.append({
+            "key": f"section_{ordinal}",
+            "ordinal": ordinal,
+            "start_type": getattr(section.start_type, "name", str(section.start_type)),
+            "page": page,
+            "header": {"content": header, "linked_to_previous": bool(section.header.is_linked_to_previous)},
+            "footer": {"content": footer, "linked_to_previous": bool(section.footer.is_linked_to_previous)},
+        })
+    return layouts
+
+
 def parse_document(path):
     """Parse a template docx into a profile dict (JSON-serializable)."""
     doc = Document(str(path))
@@ -326,6 +407,8 @@ def parse_document(path):
         "styles": {},
         "cover": {"detected": False, "fields": []},
         "toc": {"detected": False, "field_paragraphs": []},
+        "tables": extract_table_layouts(doc),
+        "sections": extract_section_layouts(doc),
         "structure": {"items": [], "has_references": False},
         "compatibility": {},
     }
@@ -337,6 +420,16 @@ def parse_document(path):
             "font": style_font_info(style),
             "paragraph": style_para_info(style),
         } if style else None
+
+    # Keep direct-format samples too.  This is deliberately separate from
+    # named-style extraction so callers can prefer visible formatting without
+    # losing the source style identity.
+    nonempty = [p for p in doc.paragraphs if p.text.strip()]
+    if nonempty:
+        profile["styles"]["title_zh_direct"] = paragraph_style_info(nonempty[0])
+    body_sample = next((p for p in nonempty if len(p.text.strip()) >= 80), None)
+    if body_sample is not None:
+        profile["styles"]["body_direct"] = paragraph_style_info(body_sample)
 
     profile["styles"]["toc_entries"] = detect_toc_styles(doc)
     profile["styles"]["table"] = None

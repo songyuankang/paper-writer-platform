@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   analyzePaper,
   downloadUrl,
+  exportPaper,
   fetchPreview,
   fetchVersions,
   restoreVersion,
@@ -13,6 +14,7 @@ import {
   type PreviewImage,
   type VersionInfo,
 } from "../api/paper";
+import TemplateManagerModal from "../components/TemplateManagerModal";
 
 type LayoutMode = "reading" | "paper";
 
@@ -61,6 +63,22 @@ export default function PreviewPage() {
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [revising, setRevising] = useState(false);
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  /** 导出：选择模板 → 后端按模板渲染 → 下载 docx。 */
+  async function handleExport(templateId: string) {
+    setTemplateModalOpen(false);
+    setExporting(true);
+    try {
+      await exportPaper(taskId, templateId);
+      window.location.href = downloadUrl(taskId, "论文.docx");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "导出失败");
+    } finally {
+      setExporting(false);
+    }
+  }
   const [restoringId, setRestoringId] = useState<number | null>(null);
   const [modal, setModal] = useState<ReviseModalState | null>(null);
   const [instruction, setInstruction] = useState("");
@@ -281,12 +299,14 @@ export default function PreviewPage() {
           >
             生成修改建议
           </button>
-          <a
-            href={downloadUrl(taskId, "论文.docx")}
-            className="rounded-lg bg-black px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700"
+          <button
+            type="button"
+            onClick={() => setTemplateModalOpen(true)}
+            disabled={exporting}
+            className="rounded-lg bg-black px-3 py-1.5 text-xs font-medium text-white hover:bg-neutral-700 disabled:opacity-40"
           >
-            下载 docx
-          </a>
+            {exporting ? "导出中…" : "下载 docx"}
+          </button>
           <button
             type="button"
             onClick={() => window.print()}
@@ -408,8 +428,8 @@ export default function PreviewPage() {
       </section>
 
       {/* 主体：目录 + 内容 */}
-      <main className="mx-auto flex max-w-6xl gap-4 px-4 py-4">
-        <aside className="no-print sticky top-16 hidden max-h-[calc(100vh-5rem)] w-56 shrink-0 overflow-y-auto rounded-xl border border-slate-200 bg-white p-3 lg:block">
+      <main className="mx-auto flex items-start max-w-6xl gap-4 px-4 py-4">
+        <aside className="no-print sticky top-16 hidden max-h-[calc(100vh-5rem)] w-56 shrink-0 self-start overflow-y-auto rounded-xl border border-slate-200 bg-white p-3 lg:block">
           <p className="mb-2 text-xs font-medium text-slate-400">论文目录</p>
           <nav className="space-y-0.5">
             {preview.chapters.map((item) => (
@@ -522,7 +542,7 @@ export default function PreviewPage() {
                           <img
                             src={downloadUrl(taskId, block.path ?? "")}
                             alt={block.number || block.title || "图表"}
-                            className="mx-auto max-w-full cursor-zoom-in rounded-lg border border-slate-200 shadow-sm"
+                            className="mx-auto h-auto max-w-full cursor-zoom-in rounded-lg border border-slate-200 shadow-sm"
                             onClick={() =>
                               setZoomImage({
                                 path: block.path ?? "",
@@ -675,6 +695,13 @@ export default function PreviewPage() {
           </div>
         </div>
       )}
+
+      <TemplateManagerModal
+        open={templateModalOpen}
+        onClose={() => setTemplateModalOpen(false)}
+        selectMode
+        onSelectTemplate={(id) => void handleExport(id)}
+      />
     </div>
   );
 }

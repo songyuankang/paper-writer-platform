@@ -67,12 +67,15 @@ def spec_from_paper_content(paper_info: dict, content_dir: Path) -> dict:
 def format_paper(task_id: str, task_dir: Path, paper_info: dict, spec: dict,
                  charts: list[dict] | None = None,
                  template_path: Path | None = None,
-                 template_id: str | None = None) -> list[str]:
-    """格式化：注入图表 → 同步 content.json → docx → 参考文献 → 检查报告 → 格式意见。
+                 template_id: str | None = None,
+                 build_docx: bool = True) -> list[str]:
+    """格式化：注入图表 → 同步 content.json → （可选）docx → 参考文献 → 检查报告 → 格式意见。
 
     - ``template_id``：指定 v2 排版模板（如 basic-general-thesis）。非 None 时
       走「spec 转换 → TemplateRenderer」新链路；None 保持旧 docx_builder 行为。
       新链路异常时回退旧构建器，保证不破坏现有生成流程。
+    - ``build_docx``：False 时跳过 docx 渲染（论文生成阶段不产出最终 Word，
+      由导出接口按所选模板渲染），其余产物（spec / content / 参考文献 / 格式意见）保留。
     """
     if charts:
         spec["sections"] = inject_charts_into_sections(spec["sections"], charts)
@@ -91,22 +94,23 @@ def format_paper(task_id: str, task_dir: Path, paper_info: dict, spec: dict,
 
     ref_style = paper_info.get("reference_style", "gb7714")
 
-    # ---- docx：优先新 TemplateRenderer 链路 ----
-    rendered = False
-    if template_id is not None:
-        from app.formatter.template import render_service
-        try:
-            # 先格式化参考文献（供渲染使用），再渲染
+    # ---- docx：优先新 TemplateRenderer 链路（build_docx=False 时跳过，导出时再渲染）----
+    if build_docx:
+        rendered = False
+        if template_id is not None:
+            from app.formatter.template import render_service
+            try:
+                # 先格式化参考文献（供渲染使用），再渲染
+                reference_mod.write_reference_deliverables(task_dir, spec, ref_style)
+                render_service.render_with_template(
+                    template_id, task_dir, spec, paper_info=paper_info)
+                rendered = True
+            except Exception as exc:  # noqa: BLE001 - 新链路失败不阻塞生成
+                logger.warning("TemplateRenderer 渲染失败，回退旧构建器: %s", exc)
+        if not rendered:
+            docx_builder.build_docx(task_dir, spec, spec.get("meta", {}),
+                                    template_path=template_path)
             reference_mod.write_reference_deliverables(task_dir, spec, ref_style)
-            render_service.render_with_template(
-                template_id, task_dir, spec, paper_info=paper_info)
-            rendered = True
-        except Exception as exc:  # noqa: BLE001 - 新链路失败不阻塞生成
-            logger.warning("TemplateRenderer 渲染失败，回退旧构建器: %s", exc)
-    if not rendered:
-        docx_builder.build_docx(task_dir, spec, spec.get("meta", {}),
-                                template_path=template_path)
-        reference_mod.write_reference_deliverables(task_dir, spec, ref_style)
 
     # 格式意见整理
     (task_dir / "格式意见整理.md").write_text(

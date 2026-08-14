@@ -75,8 +75,7 @@ curl -X POST http://127.0.0.1:8000/api/generate \
   -F "paper_type=课程论文" \
   -F "word_count=3000" \
   -F "chart_enabled=true" \
-  -F "reference_style=gb7714" \
-  -F "school_template=@school_template.docx"
+  -F "reference_style=gb7714"
 ```
 
 ### 1.0 参考资料上传（可选）

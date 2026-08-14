@@ -14,6 +14,8 @@ import json
 import re
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Iterator
 from pathlib import Path
 
 from app.config import settings
@@ -93,6 +95,50 @@ def _clean_generated_paragraphs(text: str) -> list[str]:
     return [p for p in result if p.strip()]
 
 
+def _effective_text_length(text: str) -> int:
+    """按编辑器一致的非空白字符口径统计有效正文长度。"""
+    return len(re.sub(r"\s+", "", text or ""))
+
+
+def _body_char_count(draft: dict) -> int:
+    """只统计正文叶子小节中的有效文本，不计摘要、致谢和参考文献。"""
+    leaf_ids = _leaf_ids(draft.get("sections") or [])
+    return sum(
+        _effective_text_length(str(paragraph.get("text") or ""))
+        for section in draft.get("sections") or []
+        if section.get("id") in leaf_ids
+        for paragraph in section.get("paragraphs") or []
+    )
+
+
+def _leaf_budget_weight(section: dict) -> float:
+    """按章节功能进行温和加权，避免核心分析章节被平均稀释。"""
+    title = str(section.get("title") or "")
+    if any(word in title for word in ("引言", "绪论", "结论", "总结", "展望")):
+        return 0.85
+    if any(word in title for word in ("方法", "实证", "结果", "分析", "讨论", "机制", "对策")):
+        return 1.15
+    return 1.0
+
+
+def _apply_leaf_budgets(sections: list[dict], target_chars: int) -> None:
+    """向每个叶子小节写入目标字数和最低字数，预算总和带少量清洗缓冲。"""
+    leaves = sorted(
+        [section for section in sections if section.get("id") in _leaf_ids(sections)],
+        key=lambda section: str(section.get("id") or ""),
+    )
+    if not leaves:
+        return
+    buffered_target = max(int(target_chars * 1.02), target_chars)
+    weights = [_leaf_budget_weight(section) for section in leaves]
+    weight_sum = sum(weights) or 1.0
+    budgets = [max(180, round(buffered_target * weight / weight_sum)) for weight in weights]
+    budgets[-1] += buffered_target - sum(budgets)
+    for section, budget in zip(leaves, budgets):
+        section["target_chars"] = int(budget)
+        section["min_chars"] = max(160, int(budget * 0.88))
+
+
 def _split_en_abstract(text: str) -> tuple[str, list[str]]:
     """把英文摘要生成结果拆分为（摘要, 关键词列表）。
 
@@ -136,6 +182,22 @@ class DraftService:
         self.path.write_text(
             json.dumps(draft, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def body_char_count(self, draft: dict | None = None) -> int:
+        """返回当前草稿正文有效字数，供生成验收和接口复用。"""
+        return _body_char_count(draft if draft is not None else self.load())
+
+    def _refresh_word_stats(self, draft: dict) -> dict:
+        target = max(int((draft.get("meta") or {}).get("word_count", 3000)), 500)
+        actual = _body_char_count(draft)
+        stats = {
+            "target": target,
+            "minimum": int((draft.get("meta") or {}).get("completion_min_chars", target * 0.95)),
+            "actual": actual,
+            "shortfall": max(0, target - actual),
+        }
+        draft["word_stats"] = stats
+        return stats
+
     def _paper_info(self, draft: dict) -> dict:
         meta = draft.get("meta", {})
         return {
@@ -160,12 +222,15 @@ class DraftService:
                     sections = outline_mod.build_outline(paper_info)
             else:
                 sections = outline_mod.build_outline(paper_info)
+            target_body_chars = max(int(paper_info.get("word_count", 3000)), 500)
+            _apply_leaf_budgets(sections, target_body_chars)
             draft = {
                 "title": paper_info.get("title", ""),
                 "meta": {
                     "major": paper_info.get("major", ""),
                     "paper_type": paper_info.get("paper_type", "课程论文"),
-                    "word_count": paper_info.get("word_count", 3000),
+                    "word_count": target_body_chars,
+                    "completion_min_chars": int(target_body_chars * 0.95),
                     "special_requirements": paper_info.get("special_requirements"),
                     "keywords": paper_info.get("keywords", []),
                     "reference_style": paper_info.get("reference_style", "gb7714"),
@@ -179,6 +244,12 @@ class DraftService:
                 "progress": 0,
                 "done": 0,
                 "total": len(_leaf_ids(sections)),
+                "word_stats": {
+                    "target": target_body_chars,
+                    "minimum": int(target_body_chars * 0.95),
+                    "actual": 0,
+                    "shortfall": target_body_chars,
+                },
             }
             self.save(draft)
             return draft
@@ -288,6 +359,15 @@ class DraftService:
             if not (section.get("gist") or "").strip():
                 raise ValueError(f"小节「{section['title']}」没有段落主旨，请先填写主旨")
             paper = self._paper_info(draft)
+            # 旧草稿没有预算字段时按当前目标补齐，确保重新生成也受长度约束。
+            if not section.get("target_chars"):
+                _apply_leaf_budgets(draft["sections"], int(paper["word_count"]))
+                section = self._find_section(draft, section_id)
+            target_chars = max(int(section.get("target_chars") or 300), 180)
+            min_chars = min(
+                target_chars,
+                max(int(section.get("min_chars") or target_chars * 0.88), 160),
+            )
             user = _prompt("section_generate.txt").format(
                 title=paper["title"], major=paper["major"],
                 paper_type=paper["paper_type"],
@@ -296,6 +376,8 @@ class DraftService:
                 outline=outline_mod.outline_text(draft["sections"]),
                 previous_summaries=self._previous_summaries(draft, section_id) or "（无）",
                 references=self._refs_text(draft),
+                target_chars=target_chars,
+                min_chars=min_chars,
             )
             para = {"id": self._next_paragraph_id(section), "text": ""}
             section["paragraphs"].append(para)
@@ -330,6 +412,70 @@ class DraftService:
                             {"id": self._next_paragraph_id(s), "text": seg})
             self.save(draft)
         return para
+
+    def _section_char_count(self, section: dict) -> int:
+        return sum(
+            _effective_text_length(str(paragraph.get("text") or ""))
+            for paragraph in section.get("paragraphs") or []
+        )
+
+    def _supplement_section(self, section_id: str, requested_chars: int,
+                            model_id: str | None = None) -> int:
+        """仅向字数不足的小节追加新论证，不覆盖既有或用户编辑的文本。"""
+        with self.lock:
+            draft = self.load()
+            section = self._find_section(draft, section_id)
+            paper = self._paper_info(draft)
+            current_text = "\n".join(
+                str(paragraph.get("text") or "").strip()
+                for paragraph in section.get("paragraphs") or []
+                if str(paragraph.get("text") or "").strip()
+            )
+            target = max(int(section.get("target_chars") or requested_chars), requested_chars)
+            requested = min(max(int(requested_chars), 160), 1200)
+            user = (
+                f"论文题目：{paper['title']}\n专业方向：{paper['major']}\n"
+                f"当前小节：{section['number']} {section['title']}\n"
+                f"小节主旨：{section.get('gist', '')}\n"
+                f"当前已写正文：\n{current_text}\n\n"
+                f"该小节目标约 {target} 字，目前仍需补充约 {requested} 字。"
+                "请只新增 2—4 个自然段的学术论证，补足尚未覆盖的概念、机制、依据、分析或小结；"
+                "不得复述当前文本，不得编造数据、表格、参考文献或实验结论，不得输出标题、列表、Markdown 或说明文字。"
+            )
+        ctx = self._model_ctx(model_id)
+        if not ctx:
+            return 0
+        try:
+            with ctx:
+                generated = deepseek.chat(
+                    [{"role": "system", "content": deepseek_service.system_prompt()},
+                     {"role": "user", "content": user}]
+                )
+            segments = _clean_generated_paragraphs(generated)
+        except deepseek.DeepSeekError:
+            return 0
+        if not segments:
+            return 0
+        with self.lock:
+            draft = self.load()
+            section = self._find_section(draft, section_id)
+            for segment in segments:
+                section["paragraphs"].append(
+                    {"id": self._next_paragraph_id(section), "text": segment}
+                )
+            self._refresh_word_stats(draft)
+            self.save(draft)
+        return sum(_effective_text_length(segment) for segment in segments)
+
+    def _deficient_leaf_sections(self, draft: dict) -> list[dict]:
+        leaf_ids = _leaf_ids(draft.get("sections") or [])
+        rows = []
+        for section in draft.get("sections") or []:
+            if section.get("id") not in leaf_ids:
+                continue
+            target = max(int(section.get("target_chars") or 180), 180)
+            rows.append((target - self._section_char_count(section), section))
+        return [section for deficit, section in sorted(rows, key=lambda row: row[0], reverse=True) if deficit > 0]
 
     def generate_acknowledgement(self, model_id: str | None = None) -> str:
         """生成致谢。"""
@@ -389,47 +535,172 @@ class DraftService:
 
     def oneclick(self, model_id: str | None = None,
                  progress_cb=None) -> dict:
-        """一键全文：按顺序为所有叶子小节生成段落。"""
+        """一键全文：首轮生成后验收字数，并对不足小节定向补写。"""
         with self.lock:
             draft = self.load()
-            draft["generating"] = True
-            draft["progress"] = 0
-            draft["done"] = 0
-            draft["total"] = len(_leaf_ids(draft["sections"]))
+            target_chars = max(int((draft.get("meta") or {}).get("word_count", 3000)), 500)
+            _apply_leaf_budgets(draft["sections"], target_chars)
+            draft.update(generating=True, progress=0, done=0,
+                         total=len(_leaf_ids(draft["sections"])),
+                         word_status="generating", supplement_rounds=0)
+            self._refresh_word_stats(draft)
             self.save(draft)
 
         leaf = sorted(
-            [s for s in draft["sections"]
-             if s["id"] in _leaf_ids(draft["sections"])],
-            key=lambda s: s["id"])
+            [section for section in draft["sections"]
+             if section["id"] in _leaf_ids(draft["sections"])],
+            key=lambda section: section["id"],
+        )
         done = 0
         for section in leaf:
             try:
-                if not (section.get("gist") or "").strip():
-                    continue
-                self.generate_section(section["id"], model_id)
+                if (section.get("gist") or "").strip():
+                    self.generate_section(section["id"], model_id)
             except Exception:  # noqa: BLE001
                 pass
             done += 1
             with self.lock:
-                d = self.load()
-                d["progress"] = int(done / max(1, len(leaf)) * 100)
-                d["done"] = done
-                d["generating"] = done < len(leaf)
-                self.save(d)
+                current = self.load()
+                current["progress"] = min(80, int(done / max(1, len(leaf)) * 80))
+                current["done"] = done
+                current["generating"] = True
+                self._refresh_word_stats(current)
+                self.save(current)
             if progress_cb:
                 progress_cb(done, len(leaf))
 
+        # 最多两轮：按小节缺口从大到小补写，避免无限扩写或覆盖已有正文。
+        rounds = 0
+        for round_index in range(2):
+            with self.lock:
+                current = self.load()
+                stats = self._refresh_word_stats(current)
+                if stats["actual"] >= stats["minimum"]:
+                    self.save(current)
+                    break
+                current["word_status"] = "supplementing"
+                current["supplement_rounds"] = round_index + 1
+                current["progress"] = 80 + round_index * 8
+                candidates = self._deficient_leaf_sections(current)
+                self.save(current)
+            if not candidates:
+                break
+            rounds = round_index + 1
+            for section in candidates:
+                with self.lock:
+                    latest = self.load()
+                    latest_stats = self._refresh_word_stats(latest)
+                    if latest_stats["actual"] >= latest_stats["minimum"]:
+                        self.save(latest)
+                        break
+                    fresh_section = self._find_section(latest, section["id"])
+                    deficit = max(int(fresh_section.get("target_chars") or 0)
+                                  - self._section_char_count(fresh_section), 0)
+                    global_share = max(
+                        160,
+                        (latest_stats["minimum"] - latest_stats["actual"]
+                         + max(1, len(candidates)) - 1) // max(1, len(candidates)),
+                    )
+                if deficit > 0:
+                    self._supplement_section(
+                        section["id"], min(max(deficit, global_share), 1200), model_id
+                    )
+
         with self.lock:
             draft = self.load()
+            stats = self._refresh_word_stats(draft)
+            meets_minimum = stats["actual"] >= stats["minimum"]
             draft["generating"] = False
-            draft["progress"] = 100
+            draft["supplement_rounds"] = rounds
+            draft["word_status"] = "completed" if meets_minimum else "shortfall"
+            draft["progress"] = 100 if meets_minimum else 98
             self.save(draft)
         if self.task_manager:
-            self.task_manager.update(self.task_id, progress=100,
-                                     status=TaskStatus.completed,
-                                     message="全文生成完成")
+            message = (
+                "全文生成完成，字数已达标"
+                if meets_minimum
+                else f"正文仍差 {stats['shortfall']} 字，可继续补写"
+            )
+            self.task_manager.update(
+                self.task_id,
+                progress=100 if meets_minimum else 98,
+                status=TaskStatus.completed,
+                message=message,
+            )
         return self.load()
+
+    def oneclick_stream(self, model_id: str | None = None) -> Iterator[dict]:
+        """按小节串行生成，并实时产出 AI 文本片段。"""
+        with self.lock:
+            draft = self.load()
+            draft.update(generating=True, progress=0, done=0,
+                         total=len(_leaf_ids(draft["sections"])))
+            self.save(draft)
+        leaf = [s for s in draft["sections"] if s["id"] in _leaf_ids(draft["sections"])]
+        total = len(leaf)
+        for index, section in enumerate(leaf):
+            if not (section.get("gist") or "").strip():
+                continue
+            sid = section["id"]
+            with self.lock:
+                current = self.load()
+                sec = self._find_section(current, sid)
+                paper = self._paper_info(current)
+                prompt = _prompt("section_generate.txt").format(
+                    title=paper["title"], major=paper["major"], paper_type=paper["paper_type"],
+                    number=sec["number"], section_title=sec["title"], gist=sec.get("gist", ""),
+                    outline=outline_mod.outline_text(current["sections"]),
+                    previous_summaries=self._previous_summaries(current, sid) or "（无）",
+                    references=self._refs_text(current))
+                pid = self._next_paragraph_id(sec)
+                sec["paragraphs"].append({"id": pid, "text": ""})
+                self.save(current)
+            ctx = self._model_ctx(model_id)
+            try:
+                if ctx:
+                    with ctx:
+                        chunks = deepseek.chat_stream([
+                            {"role": "system", "content": deepseek_service.system_prompt()},
+                            {"role": "user", "content": prompt}])
+                        for chunk in chunks:
+                            with self.lock:
+                                current = self.load()
+                                target = self._find_section(current, sid)
+                                target["paragraphs"][-1]["text"] += chunk
+                                self.save(current)
+                            yield {"type": "chunk", "section_id": sid, "text": chunk}
+                else:
+                    text = f"（未配置 AI 模型）{section['title']}：请配置模型后生成。"
+                    with self.lock:
+                        current = self.load()
+                        self._find_section(current, sid)["paragraphs"][-1]["text"] = text
+                        self.save(current)
+                    yield {"type": "chunk", "section_id": sid, "text": text}
+            except deepseek.DeepSeekError as exc:
+                yield {"type": "error", "section_id": sid, "message": str(exc)}
+            with self.lock:
+                current = self.load()
+                current.update(done=index + 1,
+                               progress=int((index + 1) / max(1, total) * 100),
+                               generating=index + 1 < total)
+                self.save(current)
+            yield {"type": "section_done", "done": index + 1, "total": total,
+                   "progress": int((index + 1) / max(1, total) * 100)}
+
+        # 一键全文收尾时自动补充英文摘要。
+        yield {"type": "stage", "stage": "english_abstract",
+               "message": "正在生成英文摘要..."}
+        try:
+            english_abstract = self.generate_en_abstract(model_id)
+            yield {"type": "english_abstract", "text": english_abstract}
+        except Exception as exc:  # noqa: BLE001
+            yield {"type": "error", "stage": "english_abstract",
+                   "message": f"英文摘要生成失败：{exc}"}
+        with self.lock:
+            current = self.load()
+            current.update(generating=False, progress=100)
+            self.save(current)
+        yield {"type": "completed", "done": total, "total": total, "progress": 100}
 
     # -- 导出 --------------------------------------------------------------
 
@@ -458,6 +729,10 @@ class DraftService:
                 "title": paper["title"],
                 "abstract": draft.get("abstract", {}).get("zh", ""),
                 "keywords": draft.get("keywords", {}).get("zh", []),
+                # 模板渲染器使用 abstract_en / keywords_en 渲染英文摘要页。
+                # 这里必须从草稿传递，不能只依赖导出阶段的自动翻译回退。
+                "abstract_en": draft.get("abstract", {}).get("en", ""),
+                "keywords_en": draft.get("keywords", {}).get("en", []),
                 "reference_style": paper.get("reference_style", "gb7714"),
                 "citation_style": "numeric",
             },

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   createTemplate,
@@ -8,6 +8,7 @@ import {
   listTemplates,
   setDefaultTemplate,
   updateTemplate,
+  uploadFormatTemplate,
   type TemplateDetail,
   type TemplateSummary,
   type TemplateWritePayload,
@@ -54,8 +55,11 @@ export default function Templates() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterValue>("all");
   const [query, setQuery] = useState("");
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -181,6 +185,31 @@ export default function Templates() {
     }
   }
 
+  async function handleUpload(file: File | undefined) {
+    if (!file) return;
+    if (!/\.docx$/i.test(file.name)) {
+      setError("仅支持 .docx 模板文件");
+      return;
+    }
+    const defaultName = file.name.replace(/\.docx$/i, "");
+    setUploading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const uploaded = await uploadFormatTemplate(
+        { name: defaultName, school_name: "", major: "", paper_type: "" },
+        file,
+      );
+      await load();
+      setSuccess(`模板“${uploaded.name}”上传并分析成功，已加入模板管理。`);
+      await openDetail(uploaded.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "上传模板失败");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   const visible = items.filter((item) => {
     const matchedFilter = filter === "all" || item.source === filter;
     const kw = query.trim().toLowerCase();
@@ -241,13 +270,33 @@ export default function Templates() {
               共 {items.length} 个模板
             </p>
           </div>
-          <button
-            type="button"
-            onClick={startCreate}
-            className="rounded-lg bg-black px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-neutral-700"
-          >
-            + 新建模板
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => uploadRef.current?.click()}
+              disabled={uploading}
+              className="rounded-lg border border-neutral-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-neutral-50 disabled:opacity-50"
+            >
+              {uploading ? "正在分析…" : "↑ 上传 DOCX 模板"}
+            </button>
+            <input
+              ref={uploadRef}
+              type="file"
+              accept=".docx"
+              className="hidden"
+              onChange={(e) => {
+                void handleUpload(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={startCreate}
+              className="rounded-lg bg-black px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-neutral-700"
+            >
+              + 新建模板
+            </button>
+          </div>
         </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -278,6 +327,11 @@ export default function Templates() {
         {error && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
             {error}
+          </div>
+        )}
+        {success && (
+          <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-700">
+            {success}
           </div>
         )}
 

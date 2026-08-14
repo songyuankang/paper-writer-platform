@@ -1,8 +1,9 @@
 """API endpoints: submit generation, query status, download results."""
 
 import asyncio
-import io
 import json
+import re
+import io
 import logging
 import uuid
 import zipfile
@@ -11,6 +12,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.models.generate import (
@@ -26,6 +28,13 @@ from app.models.generate import (
     PaperType,
     ReferenceStyle,
 )
+
+class TopicSuggestionsRequest(BaseModel):
+    discipline: str = Field("", max_length=100)
+    major: str = Field(..., min_length=1, max_length=100)
+    paper_type: str = Field("毕业论文", min_length=1, max_length=50)
+    model_id: str | None = None
+    prompt: str | None = Field(None, max_length=1000)
 from app.models.task import GenerateResponse, TaskInfo, TaskStatus
 from app.services import outline_service
 from app.services import preview_service
@@ -60,7 +69,6 @@ async def generate(
     special_requirements: Annotated[str | None, Form()] = None,
     generation_strategy: Annotated[GenerationStrategy, Form()] = "section",
     model_id: Annotated[str | None, Form()] = None,
-    template_id: Annotated[str, Form()] = "",
     material_kinds: Annotated[str | None, Form()] = None,
     files: Annotated[list[UploadFile] | None, File()] = None,
     abstract: Annotated[str | None, Form()] = None,
@@ -142,7 +150,6 @@ async def generate(
         special_requirements=special_requirements,
         generation_strategy=generation_strategy,
         model_id=model_id,
-        template_id=template_id,
         abstract=(abstract or "").strip() or None,
         keywords=parsed_keywords,
         references=parsed_references,
@@ -206,6 +213,34 @@ async def outline_generate(request: OutlineRequest) -> OutlineResponse:
         paper_type=request.paper_type, word_count=request.word_count,
     )
     return OutlineResponse(**result)
+
+
+@router.post("/topics/suggest")
+async def topic_suggestions(request: TopicSuggestionsRequest) -> dict:
+    """让 AI 一次生成 8 个可选论文选题。"""
+    model_cfg = model_service.resolve_model(request.model_id)
+    if model_cfg is None:
+        raise HTTPException(status_code=400, detail="未配置 AI 模型")
+    user_hint = (request.prompt or "").strip()
+    prompt = (
+        f"请严格基于以下学科门类和专业类，为该专业的{request.paper_type}生成8个互不重复、具体可研究的论文选题。"
+        f"学科门类：{request.discipline or '未指定'}；专业类：{request.major}。"
+        f"用户补充的选题方向是：{user_hint or '无，请结合以上学科和专业自主拟定'}。"
+        "要求结合专业场景，避免空泛和重复，不要解释，只返回 JSON 数组，格式为"
+        '["选题1","选题2",...,"选题8"]。'
+    )
+    from contextlib import nullcontext
+    with (deepseek.connection(model_cfg) if model_cfg else nullcontext()):
+        try:
+            text = deepseek.chat([{"role": "user", "content": prompt}])
+            match = re.search(r"\[.*\]", text, re.S)
+            topics = json.loads(match.group(0)) if match else []
+            topics = [str(x).strip() for x in topics if str(x).strip()][:8]
+            if len(topics) < 8:
+                raise ValueError("AI 返回的选题数量不足 8 个")
+            return {"topics": topics}
+        except (deepseek.DeepSeekError, json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=f"AI 选题生成失败：{exc}")
 
 
 @router.post("/abstract/generate")
@@ -348,6 +383,9 @@ async def paper_content(task_id: str, request: Request) -> dict:
 async def preview(task_id: str, request: Request) -> dict:
     """论文生成结果预览：解析 论文.docx 为网页可渲染 JSON（不返回 docx）。"""
     task_dir = _require_completed(task_id, request)
+    if (task_dir / "draft.json").exists() and not (task_dir / "论文.docx").exists():
+        return preview_service.parse_draft_preview(
+            task_dir, preview_service.load_request(task_dir))
     return preview_service.parse_preview(
         task_dir, preview_service.load_request(task_dir))
 
@@ -384,7 +422,12 @@ async def download(task_id: str, request: Request,
     if not task_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     info = request.app.state.task_manager.get(task_id)
-    if info is None or info.status != TaskStatus.completed:
+    completed = info is not None and info.status == TaskStatus.completed
+    if not completed:
+        # 内存任务管理器（重启后清空）没有该任务时，回退数据库记录判断
+        record = history_service.get_record(task_id)
+        completed = bool(record and record["status"] == "completed")
+    if not completed:
         raise HTTPException(
             status_code=409,
             detail=f"任务尚未完成（当前状态: {info.status if info else 'unknown'}）",
@@ -411,6 +454,36 @@ async def download(task_id: str, request: Request,
     }
     return StreamingResponse(
         buffer, media_type="application/zip", headers=headers)
+
+
+@router.post("/export/{task_id}")
+async def export_paper(task_id: str, template_id: str = "") -> dict:
+    """按选定排版模板导出论文 docx（未选模板时使用默认基础模板）。
+
+    生成阶段不再自动产出最终 DOCX（format_paper(build_docx=False)），
+    由本接口在用户点击「导出论文」并按所选模板渲染。
+    """
+    task_dir = _task_dir(task_id)
+    if not task_dir.is_dir():
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    spec_path = task_dir / "paper_spec.json"
+    if not spec_path.exists():
+        raise HTTPException(status_code=400, detail="论文内容不存在，请先生成论文")
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        try:
+            paper_info = preview_service.load_request(task_dir)
+        except Exception:  # noqa: BLE001 - 无 request.json 时用空信息兜底
+            paper_info = {}
+        from app.formatter.template import render_service
+        # template_id 为空/未知 → TemplateService.resolve 自动回退默认（基础）模板
+        render_service.render_with_template(
+            template_id or None, task_dir, spec, paper_info=paper_info,
+            out_name="论文.docx")
+    except Exception as exc:  # noqa: BLE001 - 统一映射为 HTTP 错误
+        logger.exception("Task %s export failed", task_id)
+        raise HTTPException(status_code=500, detail=f"导出失败：{exc}")
+    return {"ok": True, "files": ["论文.docx"]}
 
 
 @router.get("/health")

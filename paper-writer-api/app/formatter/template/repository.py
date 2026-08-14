@@ -200,6 +200,26 @@ class TemplateRepository:
         d = Path(row["dir"])
         return d if d.is_dir() else None
 
+    def source_docx_path(self, template_id: str) -> Path | None:
+        """Return the original DOCX uploaded with a v2 template."""
+        template_dir = self.template_dir(template_id)
+        if template_dir is None:
+            return None
+        for name in ("source.docx", "style.docx"):
+            path = template_dir / name
+            if path.is_file():
+                return path
+        return None
+
+    def save_source_docx(self, template_id: str, content: bytes) -> Path:
+        """Persist the source DOCX next to an existing v2 template."""
+        template_dir = self.template_dir(template_id)
+        if template_dir is None:
+            raise KeyError(f"模板不存在: {template_id}")
+        path = template_dir / "source.docx"
+        path.write_bytes(content)
+        return path
+
     def default_id(self) -> str | None:
         """存储查询：当前 is_default=1 的模板 id；无则 None。"""
         with get_conn() as conn:

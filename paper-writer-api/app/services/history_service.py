@@ -103,7 +103,34 @@ def list_records() -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM generation_records ORDER BY created_at DESC"
         ).fetchall()
-    return [dict(row) for row in rows]
+    records = [dict(row) for row in rows]
+    # 兼容服务重启或旧版本草稿任务：草稿的一键全文状态以输出目录中的
+    # task.json 为准，避免数据库曾停留在 generating 时历史页永久卡住。
+    for record in records:
+        task_file = settings.output_dir / record["task_id"] / "task.json"
+        if not task_file.exists():
+            continue
+        try:
+            task = json.loads(task_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        status = task.get("status")
+        if status not in {"completed", "failed"}:
+            continue
+        if record.get("status") == status:
+            continue
+        record["status"] = status
+        record["progress"] = task.get("progress", record.get("progress", 0))
+        record["current_stage"] = task.get("current_stage") or record.get("current_stage")
+        record["error_message"] = task.get("error")
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE generation_records SET status = ?, progress = ?, "
+                "current_stage = ?, error_message = ? WHERE task_id = ?",
+                (status, record["progress"], record["current_stage"],
+                 record["error_message"], record["task_id"]),
+            )
+    return records
 
 
 def get_record(task_id: str) -> dict | None:

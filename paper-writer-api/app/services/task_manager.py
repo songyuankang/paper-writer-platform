@@ -145,6 +145,11 @@ class TaskManager:
             return info
         return self._load_meta(task_id)
 
+    def remove(self, task_id: str) -> None:
+        """移除已删除历史记录的内存任务快照。"""
+        with self._lock:
+            self._tasks.pop(task_id, None)
+
     # -- persistence ---------------------------------------------------------
 
     def _meta_path(self, task_id: str) -> Path:

@@ -166,11 +166,12 @@ class PaperService:
             spec = build_spec(req, charts=charts)
             charts = None  # 占位路径已在 build_spec 内注入图表
 
-        # ===== 第二阶段：格式处理（markdown/json → docx 及交付物）=====
+        # ===== 第二阶段：格式处理（markdown/json → 交付物）=====
+        # 不再立即生成最终 DOCX：用户点击「导出论文」时按所选模板渲染（见 /api/export）。
         self._step(task_id, 80, "格式处理")
         formatter_service.format_paper(
             task_id, task_dir, req.model_dump(), spec, charts=charts,
-            template_id=req.template_id or None)
+            build_docx=False)
         self._step(task_id, 95, "格式化完成")
 
     # -- helpers --------------------------------------------------------------

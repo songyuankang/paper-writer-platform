@@ -1,8 +1,10 @@
 import BodyEditorUniPaper from "../../components/BodyEditorUniPaper";
+import { useNavigate } from "react-router-dom";
 import { useCreateWizard } from "./CreateWizardContext";
 
 export default function BodyPage() {
-  const { task, modelId, setModelId, models, typeDef, goStep } =
+  const navigate = useNavigate();
+  const { task, modelId, setModelId, models, typeDef } =
     useCreateWizard();
 
   if (!task) {
@@ -20,7 +22,7 @@ export default function BodyPage() {
       models={models}
       onModelChange={setModelId}
       typeLabel={typeDef?.label}
-      onBack={() => goStep(3)}
+      onBack={() => navigate("/")}
     />
   );
 }

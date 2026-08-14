@@ -1,23 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import EditorModalShell from "./EditorModalShell";
+import OneClickConfirmModal from "./OneClickConfirmModal";
+import HistoryPage from "../pages/History";
+import SettingsModels from "../pages/SettingsModels";
 import {
   addDraftParagraph,
   deleteDraftParagraph,
+  startDraftOneclick,
   downloadUrl,
   exportDraft,
   fetchDraft,
-  fetchDraftStatus,
   generateDraftAck,
   generateDraftEnAbstract,
   generateDraftSection,
   moveDraftParagraph,
-  startDraftOneclick,
   updateDraftParagraph,
   updateDraftSection,
   type PaperDraft,
   type DraftSection,
   type ModelConfig,
 } from "../api/paper";
+import TemplateManagerModal from "./TemplateManagerModal";
 
 /* ============ AI UniPaper 极简黑白样式常量 ============ */
 const BTN_BLACK =
@@ -33,15 +36,23 @@ const INPUT_FLAT =
 const paraCls =
   "w-full rounded-md border-2 border-transparent bg-white px-[11px] py-1 text-sm leading-[1.6] text-neutral-900 outline-none placeholder:text-neutral-400 [text-indent:30px] transition hover:bg-black/[0.05] focus:border-black/60 focus:bg-white";
 
-/** 已生成字数（段落 + 摘要 + 致谢）。 */
+/** 正文有效字数：仅统计叶子小节的非空白字符，与后端验收口径一致。 */
 function wordCount(draft: PaperDraft): number {
-  let n = 0;
-  for (const s of draft.sections) {
-    for (const p of s.paragraphs) n += (p.text || "").length;
-  }
-  n += (draft.abstract?.zh || "").length;
-  n += (draft.acknowledgement || "").length;
-  return n;
+  const parents = new Set(
+    draft.sections
+      .filter((section) => draft.sections.some((other) => other.id.startsWith(`${section.id}-`)))
+      .map((section) => section.id),
+  );
+  return draft.sections
+    .filter((section) => !parents.has(section.id))
+    .reduce(
+      (total, section) =>
+        total + section.paragraphs.reduce(
+          (sum, paragraph) => sum + (paragraph.text || "").replace(/\s+/g, "").length,
+          0,
+        ),
+      0,
+    );
 }
 
 /** 把数组关键词渲染为逗号分隔文本。 */
@@ -78,6 +89,14 @@ export default function BodyEditorUniPaper({
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exportedFiles, setExportedFiles] = useState<string[] | null>(null);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [oneclickConfirmOpen, setOneclickConfirmOpen] = useState(false);
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [formatOpen, setFormatOpen] = useState(false);
+  const [previewTaskId, setPreviewTaskId] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   // 当前生效模型：本地选择优先，其次外部传入，最后默认模型
@@ -126,14 +145,17 @@ export default function BodyEditorUniPaper({
     }
     pollRef.current = window.setInterval(async () => {
       try {
-        await fetchDraftStatus(taskId);
-        if (pollRef.current !== null) window.clearInterval(pollRef.current);
-        pollRef.current = null;
-        await refresh();
+        // 生成中必须刷新完整 draft，而不只是刷新进度数字；否则后端已经
+        // 写入的段落不会出现在当前页面。
+        const latest = await refresh();
+        if (latest && !latest.generating) {
+          if (pollRef.current !== null) window.clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
       } catch {
         /* 忽略轮询错误 */
       }
-    }, 2500);
+    }, 1000);
     return () => {
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
     };
@@ -167,13 +189,7 @@ export default function BodyEditorUniPaper({
     setOneclickStarting(true);
     try {
       await startDraftOneclick(taskId, activeModel || undefined);
-      const d = await refresh();
-      if (d && !d.generating) {
-        if (!d.sections.some((s) =>
-          (s.paragraphs || []).some((p) => p.text.trim()))) {
-          setError("一键全文没有生成内容，请检查 AI 模型配置");
-        }
-      }
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "启动失败");
     } finally {
@@ -181,17 +197,21 @@ export default function BodyEditorUniPaper({
     }
   }
 
-  async function handleExport() {
+  async function handleExport(templateId?: string) {
     setError(null);
     setExporting(true);
     try {
-      const res = await exportDraft(taskId);
+      const res = await exportDraft(taskId, templateId);
       setExportedFiles(res.files);
     } catch (err) {
       setError(err instanceof Error ? err.message : "导出失败");
     } finally {
       setExporting(false);
     }
+  }
+
+  function openTemplatePicker() {
+    setTemplatePickerOpen(true);
   }
 
   async function patchSection(
@@ -279,8 +299,11 @@ export default function BodyEditorUniPaper({
     );
   }
 
-  const totalWords = wordCount(draft);
-  const target = draft.meta?.word_count || 0;
+  const totalWords = draft.word_stats?.actual ?? wordCount(draft);
+  const target = draft.word_stats?.target ?? draft.meta?.word_count ?? 0;
+  const minimum = draft.word_stats?.minimum ?? Math.round(target * 0.95);
+  const shortfall = draft.word_stats?.shortfall ?? Math.max(0, target - totalWords);
+  const wordStatus = draft.word_status ?? (totalWords >= minimum ? "completed" : "shortfall");
   const pct = target > 0 ? Math.min(100, Math.round((totalWords / target) * 100)) : 0;
   const sections = draft.sections;
   const roots = sections.filter((s) => s.level === 1);
@@ -312,12 +335,24 @@ export default function BodyEditorUniPaper({
               style={{ width: `${pct}%` }}
             />
           </div>
-          <span className="text-xs text-neutral-400">字</span>
+          <span className="text-xs text-neutral-400">正文有效字数</span>
+          {!draft.generating && target > 0 && wordStatus === "shortfall" && (
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+              仍差 {shortfall} 字
+            </span>
+          )}
+          {!draft.generating && target > 0 && wordStatus === "completed" && (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+              已达标（最低 {minimum} 字）
+            </span>
+          )}
         </div>
         {draft.generating && (
           <span className="flex items-center gap-2 text-xs text-neutral-500">
             <span className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-300 border-t-black" />
-            生成中 {draft.done}/{draft.total}
+            {wordStatus === "supplementing"
+              ? `字数补写中（第 ${draft.supplement_rounds || 1} 轮）`
+              : `首轮生成中 ${draft.done}/${draft.total}`}
           </span>
         )}
         <div className="flex-1" />
@@ -337,14 +372,14 @@ export default function BodyEditorUniPaper({
               ))}
           </select>
         )}
-        <nav className="hidden items-center gap-3 text-sm text-neutral-600 sm:flex">
-          <Link to="/templates" className="hover:text-black">模板管理</Link>
-          <Link to="/history" className="hover:text-black">历史记录</Link>
-          <Link to="/settings/models" className="hover:text-black">模型设置</Link>
+        <nav className="hidden items-center gap-3 text-sm text-neutral-600 sm:flex" aria-label="编辑器工具">
+          <button type="button" onClick={() => setTemplateManagerOpen(true)} className="hover:text-black">模板管理</button>
+          <button type="button" onClick={() => setHistoryOpen(true)} className="hover:text-black">历史记录</button>
+          <button type="button" onClick={() => setModelSettingsOpen(true)} className="hover:text-black">模型设置</button>
         </nav>
         <button
           type="button"
-          onClick={handleOneclick}
+          onClick={() => setOneclickConfirmOpen(true)}
           disabled={draft.generating || oneclickStarting}
           className={BTN_BLACK}
         >
@@ -352,7 +387,7 @@ export default function BodyEditorUniPaper({
         </button>
         <button
           type="button"
-          onClick={handleExport}
+          onClick={() => void openTemplatePicker()}
           disabled={exporting}
           className={BTN_GHOST}
         >
@@ -360,6 +395,12 @@ export default function BodyEditorUniPaper({
         </button>
       </header>
 
+      {!draft.generating && target > 0 && wordStatus === "shortfall" && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-800">
+          <span className="font-semibold">正文尚未达标</span>
+          <span>当前 {totalWords}/{target} 字，仍差 {shortfall} 字；系统已完成最多两轮定向补写。可补充或编辑正文后再次执行一键全文。</span>
+        </div>
+      )}
       {error && (
         <div className="border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-700">
           {error}
@@ -375,12 +416,12 @@ export default function BodyEditorUniPaper({
           >
             下载论文.docx
           </a>
-          <Link to={`/preview/${taskId}`} className="underline underline-offset-2 hover:text-neutral-600">
+          <button type="button" onClick={() => setRevisionOpen(true)} className="underline underline-offset-2 hover:text-neutral-600">
             在线预览 / 修订
-          </Link>
-          <Link to={`/format/${taskId}`} className="underline underline-offset-2 hover:text-neutral-600">
+          </button>
+          <button type="button" onClick={() => setFormatOpen(true)} className="underline underline-offset-2 hover:text-neutral-600">
             格式处理
-          </Link>
+          </button>
           <button
             type="button"
             onClick={() => setExportedFiles(null)}
@@ -390,6 +431,84 @@ export default function BodyEditorUniPaper({
           </button>
         </div>
       )}
+
+      <TemplateManagerModal
+        open={templateManagerOpen}
+        onClose={() => setTemplateManagerOpen(false)}
+      />
+      <EditorModalShell
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        title="历史记录"
+        description="查看、筛选、导出或重新生成任务，不离开当前编辑页。"
+      >
+        <HistoryPage
+          embedded
+          onOpenPreview={(historyTaskId) => {
+            setHistoryOpen(false);
+            setPreviewTaskId(historyTaskId);
+            setRevisionOpen(true);
+          }}
+        />
+      </EditorModalShell>
+      <EditorModalShell
+        open={modelSettingsOpen}
+        onClose={() => setModelSettingsOpen(false)}
+        title="模型设置"
+        description="管理当前写作可用的模型配置，不离开编辑页。"
+        className="max-w-[1120px]"
+      >
+        <SettingsModels embedded />
+      </EditorModalShell>
+      <EditorModalShell
+        open={revisionOpen}
+        onClose={() => { setRevisionOpen(false); setPreviewTaskId(null); }}
+        title="在线预览 / 修订"
+        description="预览和修订在当前编辑页的弹窗中进行，不改变浏览器地址。"
+        className="max-w-[1200px]"
+      >
+        <iframe
+          title="论文预览与修订"
+          src={`/preview/${previewTaskId || taskId}`}
+          className="h-[72vh] w-full rounded-lg border border-slate-200 bg-white"
+        />
+      </EditorModalShell>
+      <EditorModalShell
+        open={formatOpen}
+        onClose={() => setFormatOpen(false)}
+        title="格式处理"
+        description="格式处理在当前编辑页的弹窗中完成，不改变浏览器地址。"
+        className="max-w-[1200px]"
+      >
+        <iframe
+          title="论文格式处理"
+          src={`/format/${taskId}`}
+          className="h-[72vh] w-full rounded-lg border border-slate-200 bg-white"
+        />
+      </EditorModalShell>
+      <OneClickConfirmModal
+        open={oneclickConfirmOpen}
+        onClose={() => setOneclickConfirmOpen(false)}
+        onConfirm={() => {
+          setOneclickConfirmOpen(false);
+          void handleOneclick();
+        }}
+        modelName={models?.find((model) => model.id === activeModel)?.name}
+        currentWords={totalWords}
+        targetWords={target}
+        sectionCount={draft.sections.filter((section) => section.level === 1).length}
+        busy={oneclickStarting || draft.generating}
+      />
+
+      <TemplateManagerModal
+        open={templatePickerOpen}
+        onClose={() => setTemplatePickerOpen(false)}
+        selectMode
+        onSelectTemplate={(templateId) => {
+          setTemplatePickerOpen(false);
+          void handleExport(templateId);
+        }}
+      />
 
       {/* ============ 主体：左目录树 + 右正文流 ============ */}
       <div className="flex flex-1 overflow-hidden">
@@ -468,11 +587,14 @@ export default function BodyEditorUniPaper({
             );
             return (
               <div key={root.id} className="border-b border-neutral-100">
-                {/* 章节点：可编辑标题 */}
+                {/* 章节点：可编辑标题（显示 number + title） */}
                 <div
                   className="flex h-[70px] cursor-pointer items-center rounded-md px-4 hover:bg-black/[0.05]"
                   onClick={() => scrollTo(`sec-${root.id}`)}
                 >
+                  <span className="w-7 shrink-0 text-right text-[11px] text-neutral-400">
+                    {root.number}
+                  </span>
                   <input
                     value={root.title}
                     onChange={(e) =>
@@ -631,7 +753,9 @@ export default function BodyEditorUniPaper({
               );
               return (
                 <section key={root.id} id={`sec-${root.id}`} className="mt-6">
-                  <h2 className="text-xl font-bold">{root.title}</h2>
+                  <h2 className="text-xl font-bold">
+                    {root.number} {root.title}
+                  </h2>
                   {children.map((child) => {
                     const grandchildren = sections.filter(
                       (s) => s.level === 3 && s.id.startsWith(child.id + "-"),
@@ -734,8 +858,9 @@ function AutoGrowTextarea({
   const grow = useCallback(() => {
     const el = ref.current;
     if (!el) return;
-    el.style.height = "auto";
+    el.style.height = "0px";
     el.style.height = `${el.scrollHeight}px`;
+    el.style.overflowY = "hidden";
   }, []);
   useEffect(() => {
     grow();

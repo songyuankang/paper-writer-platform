@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.draft.service import DraftService
+from app.services import history_service
 
 router = APIRouter(prefix="/api/draft", tags=["draft"])
 
@@ -135,11 +136,19 @@ def oneclick(task_id: str, body: GenerateRequest, request: Request) -> dict:
     def run() -> None:
         try:
             service.oneclick(body.model_id)
+            # 草稿模式的一键全文不经过 paper_service 的常规完成分支，
+            # 必须在这里同步历史记录状态。
+            history_service.update_record(
+                task_id, status="completed", error=None, completed=False)
+            history_service.update_record_progress(
+                task_id, current_stage="completed", progress=100)
         except Exception:  # noqa: BLE001
             with service.lock:
                 d = service.load()
                 d["generating"] = False
                 service.save(d)
+            history_service.update_record(
+                task_id, status="failed", error="一键全文生成失败")
 
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True, "message": "开始一键全文生成"}

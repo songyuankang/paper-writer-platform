@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
-from docx.enum.section import WD_ORIENT
+from docx.enum.section import WD_ORIENT, WD_SECTION
+from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
 from docx.oxml import OxmlElement
@@ -357,16 +358,19 @@ class TemplateRenderer:
     def __init__(self, default_template: Template | None = None):
         self.default_template = default_template
         self._counters: list[int] = [0, 0, 0, 0]
+        self._source_heading_styles: tuple[str, ...] = ()
 
     # ------------------------------------------------------------------
     # 入口
     # ------------------------------------------------------------------
     def render(self, template: Template, spec: dict,
-               base_dir: Path | str | None = None) -> Document:
+               base_dir: Path | str | None = None,
+               source_docx: Path | str | None = None) -> Document:
         """渲染模板 + 内容 → 内存 Document（不落盘）。"""
         self._counters = [0, 0, 0, 0]
         self._numbering = template.numbering or {}
-        doc = self._open_document()
+        self._source_heading_styles = self._source_heading_style_names(source_docx)
+        doc = self._open_document(source_docx)
         self._apply_page_setup(doc, template.page)
         self._apply_header_footer(doc, template.header, template.footer)
         self._render_content(doc, spec, template, base_dir)
@@ -388,13 +392,22 @@ class TemplateRenderer:
     # ------------------------------------------------------------------
     # 文档打开（cover.docx 扩展点）
     # ------------------------------------------------------------------
-    def _open_document(self) -> Document:
+    def _open_document(self, source_docx: Path | str | None = None) -> Document:
         """新建空白文档。
 
         未来支持 cover.docx 时：若模板目录存在 cover.docx，则以它为基底
         打开（保留封面/页眉页脚母版），并定位正文插入点；本阶段先新建。
         """
-        return Document()
+        path = Path(source_docx) if source_docx else None
+        if path is None or not path.is_file():
+            return Document()
+        doc = Document(str(path))
+        body = doc.element.body
+        sect_pr = body.sectPr
+        for child in list(body):
+            if child is not sect_pr:
+                body.remove(child)
+        return doc
 
     # ------------------------------------------------------------------
     # 页面设置
@@ -444,12 +457,16 @@ class TemplateRenderer:
                              footer: dict) -> None:
         sec = doc.sections[0]
         if isinstance(header, dict) and header.get("content"):
+            paragraph = sec.header.paragraphs[0]
+            paragraph.clear()
             self._render_field_text(
-                sec.header.paragraphs[0], str(header["content"]),
+                paragraph, str(header["content"]),
                 TemplateStyle.from_dict(header.get("style")))
         if isinstance(footer, dict) and footer.get("content"):
+            paragraph = sec.footer.paragraphs[0]
+            paragraph.clear()
             self._render_field_text(
-                sec.footer.paragraphs[0], str(footer["content"]),
+                paragraph, str(footer["content"]),
                 TemplateStyle.from_dict(footer.get("style")))
 
     def _render_field_text(self, paragraph, content: str,
@@ -484,9 +501,8 @@ class TemplateRenderer:
     # 内容渲染（spec 分发）
     # ------------------------------------------------------------------
     def _render_content(self, doc: Document, spec: dict, template: Template,
-                        base_dir) -> None:
+                        base_dir: Path | None = None) -> None:
         meta = spec.get("meta") or {}
-
         if meta.get("title"):
             self._render_title(doc, meta["title"], template, "title_zh")
         if meta.get("title_en"):
@@ -496,21 +512,25 @@ class TemplateRenderer:
         if meta.get("keywords"):
             self._render_keywords(doc, meta["keywords"], template, "keywords")
         if meta.get("abstract_en"):
-            self._render_abstract(doc, meta["abstract_en"], template,
-                                  "abstract_en")
+            if meta.get("abstract") or meta.get("keywords"):
+                doc.add_page_break()
+            self._render_abstract(doc, meta["abstract_en"], template, "abstract_en")
         if meta.get("keywords_en"):
-            self._render_keywords(doc, meta["keywords_en"], template,
-                                  "keywords_en")
+            self._render_keywords(doc, meta["keywords_en"], template, "keywords_en")
 
         toc_rendered = False
         for item in spec.get("sections") or []:
             if not isinstance(item, dict):
                 continue
             kind = item.get("type")
-            # 在首个标题前插入目录（模板启用且 meta.toc 未显式关闭）
             if kind in ("h1", "h2", "h3", "h4") and not toc_rendered:
+                has_prelim = bool(meta.get("abstract") or meta.get("keywords") or
+                                  meta.get("abstract_en") or meta.get("keywords_en"))
+                if has_prelim:
+                    doc.add_page_break()
                 if self._toc_enabled(template) and bool(meta.get("toc", True)):
                     self._render_toc(doc, template)
+                    doc.add_page_break()
                 toc_rendered = True
             if kind == "h1":
                 self._render_heading(doc, item.get("text", ""), 1, template)
@@ -528,20 +548,17 @@ class TemplateRenderer:
                 self._render_table(doc, item, template)
             elif kind == "pagebreak":
                 doc.add_page_break()
+            elif kind in ("sectionbreak", "section_break"):
+                self._render_section_break(doc, item, template)
             elif kind == "references":
                 self._render_references(doc, item, template, meta)
             elif kind == "acknowledgement":
-                self._render_special(doc, item.get("text")
-                                     or item.get("content") or "", template,
-                                     "acknowledgement")
+                self._render_special(doc, item.get("text") or item.get("content") or "",
+                                     template, "acknowledgement")
             elif kind == "appendix":
-                self._render_special(doc, item.get("text")
-                                     or item.get("content") or "", template,
-                                     "appendix")
+                self._render_special(doc, item.get("text") or item.get("content") or "",
+                                     template, "appendix")
 
-    # ------------------------------------------------------------------
-    # 各要素渲染
-    # ------------------------------------------------------------------
     def _render_title(self, doc: Document, text: str, template: Template,
                       key: str) -> None:
         block = self._resolve_block(template, key, key)
@@ -552,9 +569,10 @@ class TemplateRenderer:
                          key: str) -> None:
         block = self._resolve_block(template, key, key)
         title_style = self._block_style(block, "title")
+        title_style.alignment = TextAlign.CENTER
+        title_style.first_line_indent_value = 0.0
         content_style = self._block_style(block, "content")
-        title = {"abstract": "摘  要", "abstract_en": "Abstract"}.get(
-            key, "摘  要")
+        title = {"abstract": "摘  要", "abstract_en": "Abstract"}.get(key, "摘  要")
         self._add_styled_paragraph(doc, title, title_style)
         for para in str(text).splitlines() or [str(text)]:
             if para.strip():
@@ -576,7 +594,7 @@ class TemplateRenderer:
 
     def _render_heading(self, doc: Document, text: str, level: int,
                         template: Template) -> None:
-        stripped = (text or "").strip()
+        stripped = self._normalize_heading_text((text or "").strip())
         # 特殊一级标题（致谢/参考文献/附录）→ 对应 block，不自动编号
         if level == 1 and stripped in _SPECIAL_HEADINGS:
             key, role = _SPECIAL_HEADINGS[stripped]
@@ -604,7 +622,10 @@ class TemplateRenderer:
     def _render_toc(self, doc: Document, template: Template) -> None:
         block = self._resolve_block(template, "toc", "toc")
         title_style = self._block_style(block, "title")
-        self._add_styled_paragraph(doc, "目  录", title_style, outline_level=1)        # 真正的 Word TOC 域
+        # 目录标题不能设置 outline_level —— 否则刷新后的目录会把
+        # “目 录”自己收进 TOC（自引用条目）
+        self._add_styled_paragraph(doc, "目  录", title_style)
+        # 真正的 Word TOC 域
         p = doc.add_paragraph()
         run = p.add_run()
         r = run._r
@@ -647,6 +668,51 @@ class TemplateRenderer:
             style = self._block_style(block, "self")
             self._add_styled_paragraph(doc, str(title), style)
 
+    def _render_section_break(self, doc: Document, item: dict,
+                              template: Template) -> None:
+        """Insert a document section using an explicit content-spec boundary."""
+        block = self._resolve_block(template, item.get("template_key"), "sectionbreak")
+        settings = dict(block.settings or {})
+        settings.update({k: v for k, v in item.items() if k in {"start_type", "page", "header", "footer", "page_number"}})
+        start_type = str(settings.get("start_type") or "NEW_PAGE").upper()
+        section_type = {
+            "CONTINUOUS": WD_SECTION.CONTINUOUS,
+            "EVEN_PAGE": WD_SECTION.EVEN_PAGE,
+            "ODD_PAGE": WD_SECTION.ODD_PAGE,
+            "NEW_PAGE": WD_SECTION.NEW_PAGE,
+            "NEXT_PAGE": WD_SECTION.NEW_PAGE,
+        }.get(start_type, WD_SECTION.NEW_PAGE)
+        section = doc.add_section(section_type)
+        page = settings.get("page") or {}
+        if isinstance(page, dict):
+            margins = page.get("margins") or {}
+            if _is_num(margins.get("top_mm")):
+                section.top_margin = Mm(margins["top_mm"])
+            if _is_num(margins.get("bottom_mm")):
+                section.bottom_margin = Mm(margins["bottom_mm"])
+            if _is_num(margins.get("left_mm")):
+                section.left_margin = Mm(margins["left_mm"])
+            if _is_num(margins.get("right_mm")):
+                section.right_margin = Mm(margins["right_mm"])
+        for attr, part_name in (("header", "header"), ("footer", "footer")):
+            content = settings.get(attr)
+            if not isinstance(content, dict) or not content.get("content"):
+                continue
+            part = getattr(section, part_name)
+            part.is_linked_to_previous = bool(content.get("linked_to_previous", False))
+            paragraph = part.paragraphs[0]
+            paragraph.clear()
+            self._render_field_text(
+                paragraph,
+                str(content["content"]),
+                TemplateStyle.from_dict(content.get("style")),
+            )
+        page_number = settings.get("page_number") or {}
+        if isinstance(page_number, dict) and page_number.get("restart"):
+            pg_num = OxmlElement("w:pgNumType")
+            pg_num.set(qn("w:start"), str(int(page_number.get("start", 1))))
+            section._sectPr.append(pg_num)
+
     def _render_table(self, doc: Document, item: dict,
                       template: Template) -> None:
         title = item.get("title")
@@ -655,7 +721,9 @@ class TemplateRenderer:
                                         "table_caption")
             style = self._block_style(block, "self")
             self._add_styled_paragraph(doc, str(title), style)
-        headers = item.get("headers") or []
+        block = self._resolve_block(template, item.get("template_key"), "table")
+        table_settings = dict(block.settings or {})
+        headers = item.get("headers") or table_settings.get("headers") or []
         rows = item.get("rows") or []
         n_cols = max(len(headers), len(rows[0]) if rows else 0, 1)
         n_rows = len(rows) + (1 if headers else 0)
@@ -665,6 +733,12 @@ class TemplateRenderer:
         except (KeyError, ValueError):
             pass
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        widths = item.get("column_widths_cm") or table_settings.get("column_widths_cm") or []
+        for col, width_cm in enumerate(widths):
+            if not _is_num(width_cm) or col >= n_cols:
+                continue
+            for row in table.rows:
+                row.cells[col].width = Mm(width_cm)
         r = 0
         if headers:
             for c, h in enumerate(headers):
@@ -743,6 +817,20 @@ class TemplateRenderer:
         return out
 
     @staticmethod
+    def _normalize_heading_text(text: str) -> str:
+        """Normalize legacy ``chapter-section.subsection`` heading prefixes.
+
+        Older content generators emit forms such as ``1-1.1 Title``. They are
+        normalized before duplicate-number detection so the renderer preserves a
+        single canonical number rather than prepending a second counter.
+        """
+        return re.sub(
+            r"^(\d+)-(\d+)\.(\d+)(?=\s|$)",
+            r"\1.\2.\3",
+            text or "",
+        )
+
+    @staticmethod
     def _looks_numbered(text: str) -> bool:
         return bool(_NUMBERED_PREFIX.match(text or ""))
 
@@ -784,11 +872,67 @@ class TemplateRenderer:
                               style: TemplateStyle | None,
                               outline_level: int | None = None):
         p = doc.add_paragraph()
+        if outline_level is not None:
+            self._apply_heading_paragraph_style(p, outline_level)
         run = p.add_run(text)
         self._apply_style(p, run, style)
         if outline_level is not None:
             self._set_outline_level(p, outline_level)
         return p
+
+    @staticmethod
+    def _source_heading_style_names(source_docx: Path | str | None) -> tuple[str, ...]:
+        """Return heading style names used by the uploaded source document.
+
+        The source template can use nonstandard Word heading levels, such as
+        Heading 3/4/5 for chapter/section/subsection.  Preserve the first
+        occurrence order so semantic renderer levels map back to the same
+        document styles instead of flattening all generated headings to Normal.
+        """
+        path = Path(source_docx) if source_docx else None
+        if path is None or not path.is_file():
+            return ()
+        try:
+            source = Document(str(path))
+        except Exception:  # noqa: BLE001 - a malformed optional source falls back safely
+            return ()
+        names: list[str] = []
+        for paragraph in source.paragraphs:
+            name = getattr(paragraph.style, "name", "") or ""
+            if not re.fullmatch(r"(?:Heading|鏍囬)\s*\d+", name, flags=re.IGNORECASE):
+                continue
+            if name not in names:
+                names.append(name)
+        return tuple(names)
+
+    def _apply_heading_paragraph_style(self, paragraph, level: int) -> None:
+        """Assign a semantic paragraph style before applying direct formatting.
+
+        Templates frequently reference Word latent heading styles in paragraph
+        XML without shipping concrete style definitions.  Such names can be
+        read from source paragraphs but cannot be assigned by python-docx.  Try
+        all source and built-in names first; if none is writable, create a
+        stable custom paragraph style so generated headings never collapse to
+        Normal.
+        """
+        candidates: list[str] = []
+        if 1 <= level <= len(self._source_heading_styles):
+            candidates.append(self._source_heading_styles[level - 1])
+        candidates.extend((f"Heading {level}", f"鏍囬 {level}"))
+        for style_name in candidates:
+            try:
+                paragraph.style = style_name
+                return
+            except (KeyError, ValueError):
+                continue
+
+        style_name = f"PW Heading {level}"
+        doc = paragraph.part.document
+        try:
+            doc.styles[style_name]
+        except KeyError:
+            doc.styles.add_style(style_name, WD_STYLE_TYPE.PARAGRAPH)
+        paragraph.style = style_name
 
     def _apply_style(self, paragraph, run, style: TemplateStyle | None) -> None:
         """把 TemplateStyle 应用到 paragraph + run（唯一样式入口）。"""

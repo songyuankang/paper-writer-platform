@@ -56,9 +56,13 @@ class Settings(BaseSettings):
     task_workers: int = 2
     task_expiry_hours: int = 24
 
+    # 正文一键生成的并发数。免费模型通常有严格频率限制，默认设为 1。
+    # 付费额度充足时可通过 PAPER_WRITER_DRAFT_GENERATION_WORKERS 调高。
+    draft_generation_workers: int = 1
+
     # paper-writer skill engine (scripts directory, imported at runtime)
     paper_writer_scripts_dir: Path = (
-        Path.home() / ".codex" / "skills" / "paper-writer" / "scripts"
+        Path(__file__).resolve().parent.parent / "paper_writer_scripts"
     )
 
     def ensure_dirs(self) -> None:

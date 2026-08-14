@@ -1,4 +1,6 @@
-import { downloadUrl } from "../api/paper";
+import { useState } from "react";
+import { downloadUrl, exportPaper } from "../api/paper";
+import TemplateManagerModal from "./TemplateManagerModal";
 
 interface ResultDownloadProps {
   taskId: string;
@@ -6,7 +8,8 @@ interface ResultDownloadProps {
 }
 
 export default function ResultDownload({ taskId, files }: ResultDownloadProps) {
-  const hasDocx = files.includes("论文.docx");
+  const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const hasReview = files.includes("格式意见整理.md");
   const figure =
     files.find((f) => f.startsWith("charts/figure_")) ??
@@ -14,13 +17,6 @@ export default function ResultDownload({ taskId, files }: ResultDownloadProps) {
   const hasChartData = files.includes("charts/chart_data.json");
 
   const links: { label: string; href: string; desc: string }[] = [];
-  if (hasDocx) {
-    links.push({
-      label: "论文.docx",
-      href: downloadUrl(taskId, "论文.docx"),
-      desc: "论文成稿",
-    });
-  }
   if (hasReview) {
     links.push({
       label: "格式意见.md",
@@ -45,15 +41,37 @@ export default function ResultDownload({ taskId, files }: ResultDownloadProps) {
   links.push({
     label: "全部下载（ZIP）",
     href: downloadUrl(taskId),
-    desc: "论文 + 图表 + 检查报告",
+    desc: "内容 + 图表 + 检查报告",
   });
+
+  /** 导出：选择排版模板 → 后端按模板渲染 docx → 下载。 */
+  async function handleExport(templateId: string) {
+    setTemplateModalOpen(false);
+    setExporting(true);
+    try {
+      await exportPaper(taskId, templateId);
+      window.location.href = downloadUrl(taskId, "论文.docx");
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "导出失败");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div className="rounded-2xl border border-green-200 bg-green-50 p-5">
       <div className="mb-3 flex items-center gap-2">
         <span className="text-lg">🎉</span>
-        <h3 className="font-semibold text-green-800">生成完成，请下载结果</h3>
+        <h3 className="font-semibold text-green-800">生成完成，请导出论文</h3>
       </div>
+      <button
+        type="button"
+        onClick={() => setTemplateModalOpen(true)}
+        disabled={exporting}
+        className="mb-3 w-full rounded-xl bg-black py-2.5 text-center text-sm font-semibold text-white transition hover:bg-neutral-700 disabled:opacity-50"
+      >
+        {exporting ? "导出中…" : "导出论文（选择排版格式）"}
+      </button>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         {links.map((link) => (
           <a
@@ -66,6 +84,13 @@ export default function ResultDownload({ taskId, files }: ResultDownloadProps) {
           </a>
         ))}
       </div>
+
+      <TemplateManagerModal
+        open={templateModalOpen}
+        onClose={() => setTemplateModalOpen(false)}
+        selectMode
+        onSelectTemplate={(id) => void handleExport(id)}
+      />
     </div>
   );
 }

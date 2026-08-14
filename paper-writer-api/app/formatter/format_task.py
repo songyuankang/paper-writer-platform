@@ -110,6 +110,13 @@ class FormatTaskManager:
             template_path = None
             if use_template and record.get("template_id"):
                 template_path = template_manager.style_path(record["template_id"])
+                if template_path is None:
+                    # New v2 uploads keep their original DOCX next to the
+                    # structured template.  The legacy formatter can use the
+                    # same source file during the migration period.
+                    from app.formatter.template import get_service
+                    template_path = get_service().repo.source_docx_path(
+                        record["template_id"])
 
             self._update(format_id, "processing", 40, "正在排版 Word 文档")
             out_dir = task_dir / "formatted"

@@ -13,14 +13,10 @@ import {
   fetchTaskStatus,
   generateAbstract,
   generatePaper,
-  getTemplateDetail,
-  listTemplates,
   searchReferences,
   type ModelConfig,
   type ReferenceItem,
   type TaskInfo,
-  type TemplateDetail,
-  type TemplateSummary,
 } from "../../api/paper";
 
 /** 12 大学科门类（对应 aiunipaper 的专业选择）。 */
@@ -158,6 +154,8 @@ const STEP_PATHS: Record<string, number> = {
   "/create/body": 4,
 };
 
+const LAST_TASK_STORAGE_KEY = "paper-writer:last-task-id";
+
 interface CreateWizardContextValue {
   paperType: string;
   setPaperType: (value: string) => void;
@@ -199,10 +197,6 @@ interface CreateWizardContextValue {
   models: ModelConfig[];
   modelId: string;
   setModelId: (value: string) => void;
-  templates: TemplateSummary[];
-  templateId: string;
-  setTemplateId: (value: string) => void;
-  templateDetail: TemplateDetail | null;
   task: TaskInfo | null;
   error: string | null;
   submitting: boolean;
@@ -216,6 +210,7 @@ interface CreateWizardContextValue {
   activeStep: number;
   stepBadge: (num: number) => ReactNode;
   recommendTopic: () => void;
+  getRecommendedTopics: () => string[];
   addMaterialFiles: (selected: FileList | null) => void;
   removeMaterialFile: (index: number) => void;
   formatSize: (bytes: number) => string;
@@ -260,10 +255,6 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
   const [refError, setRefError] = useState<string | null>(null);
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [modelId, setModelId] = useState("");
-  const [templates, setTemplates] = useState<TemplateSummary[]>([]);
-  const [templateId, setTemplateId] = useState("");
-  const [templateDetail, setTemplateDetail] =
-    useState<TemplateDetail | null>(null);
   const [task, setTask] = useState<TaskInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -279,6 +270,30 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
   const taskDone = task !== null && task.status === "completed";
   const progress = task?.progress ?? 0;
   const step = STEP_PATHS[location.pathname] ?? 1;
+
+  /**
+   * 后端已删除任务时，清除该任务的浏览器恢复缓存和进度状态，
+   * 防止刷新页面后仍渲染旧的“已生成 / 5%”进度条。
+   */
+  function clearMissingTask(taskId: string) {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    if (window.localStorage.getItem(LAST_TASK_STORAGE_KEY) === taskId) {
+      window.localStorage.removeItem(LAST_TASK_STORAGE_KEY);
+    }
+    setTask((current) => (current?.task_id === taskId ? null : current));
+    setSubmitting(false);
+
+    // 已删除任务的正文直达地址没有可恢复内容，回到选题页重新开始。
+    if (
+      location.pathname === "/create/body" &&
+      searchParams.get("task") === taskId
+    ) {
+      navigate("/create/topic", { replace: true });
+    }
+  }
 
   useEffect(
     () => () => {
@@ -297,34 +312,27 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
 
   // 从 URL ?task= 恢复编辑器任务：直达/刷新正文页时不丢编辑器状态
   useEffect(() => {
-    const tid = searchParams.get("task");
+    const tid = searchParams.get("task") ||
+      window.localStorage.getItem(LAST_TASK_STORAGE_KEY);
     if (!tid || task) {
       return;
     }
     fetchTaskStatus(tid)
-      .then((info) => setTask(info))
-      .catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
-
-  useEffect(() => {
-    listTemplates()
-      .then((data) => {
-        setTemplates(data.items);
-        setTemplateId(data.default_id ?? data.items[0]?.id ?? "");
+      .then((info) => {
+        setTask(info);
+        // 规范化地址，后续刷新时即使 localStorage 被清理也能恢复任务。
+        if (!searchParams.get("task") && location.pathname === "/create/body") {
+          navigate(`/create/body?task=${encodeURIComponent(tid)}`, { replace: true });
+        }
+        if (info.status !== "completed" && info.status !== "failed") {
+          startProgressStream(tid);
+        }
       })
-      .catch(() => setTemplates([]));
-  }, []);
-
-  useEffect(() => {
-    if (!templateId) {
-      setTemplateDetail(null);
-      return;
-    }
-    getTemplateDetail(templateId)
-      .then(setTemplateDetail)
-      .catch(() => setTemplateDetail(null));
-  }, [templateId]);
+      .catch(() => {
+        clearMissingTask(tid);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, location.pathname]);
 
   useEffect(() => {
     setWordCount(typeDef.words[0]);
@@ -346,6 +354,11 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
     const pool = TOPIC_SUGGESTIONS[discipline] ?? TOPIC_SUGGESTIONS["工学"];
     const idx = pool.indexOf(topic);
     setTopic(pool[(idx + 1) % pool.length]);
+  }
+
+  function getRecommendedTopics() {
+    const pool = TOPIC_SUGGESTIONS[discipline] ?? TOPIC_SUGGESTIONS["工学"];
+    return [...pool].slice(0, 8);
   }
 
   const ALLOWED_UPLOAD_EXT = [
@@ -507,10 +520,10 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
           keywords,
           references: selectedRefs.length > 0 ? selectedRefs : undefined,
           draft_mode: true,
-          template_id: templateId || undefined,
         });
+        window.localStorage.setItem(LAST_TASK_STORAGE_KEY, task_id);
         startProgressStream(task_id);
-        goStep(4);
+        navigate(`/create/body?task=${encodeURIComponent(task_id)}`);
       } catch (err) {
         setSubmitting(false);
         setError(
@@ -539,11 +552,7 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
             setSubmitting(false);
           }
         } catch {
-          if (pollRef.current !== null) {
-            window.clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
-          setSubmitting(false);
+          clearMissingTask(taskId);
         }
       }, 1500);
     };
@@ -578,7 +587,9 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
         });
         if (data.status === "completed" || data.status === "failed") {
           finish();
-          void fetchTaskStatus(taskId).then(setTask).catch(() => undefined);
+          void fetchTaskStatus(taskId).then(setTask).catch(() => {
+            clearMissingTask(taskId);
+          });
         }
       } catch {
         // 忽略无法解析的事件
@@ -659,10 +670,6 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
     models,
     modelId,
     setModelId,
-    templates,
-    templateId,
-    setTemplateId,
-    templateDetail,
     task,
     error,
     submitting,
@@ -676,6 +683,7 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
     activeStep,
     stepBadge,
     recommendTopic,
+    getRecommendedTopics,
     addMaterialFiles,
     removeMaterialFile,
     formatSize,
