@@ -1487,6 +1487,88 @@ export async function attachDataset(datasetId: string, taskId: string): Promise<
   return ((await res.json()) as { dataset: DatasetSummary }).dataset;
 }
 
+export type AnalysisType = "descriptive" | "pearson" | "spearman";
+export type AnalysisStatus = "ready" | "stale" | "running" | "failed";
+export interface Analysis {
+  id: string;
+  task_id: string;
+  dataset_id: string;
+  dataset_version: number;
+  dataset_version_id: string;
+  type: AnalysisType;
+  name: string;
+  description: string;
+  variables: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+  status: AnalysisStatus;
+  stale_reason?: string | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at: string;
+  last_result_id?: string | null;
+}
+export interface AnalysisResult {
+  id: string;
+  analysis_id: string;
+  dataset_id: string;
+  dataset_version: number;
+  dataset_version_id: string;
+  result: {
+    method: AnalysisType;
+    numeric?: Array<{ variable: string; count: number; missing: number; mean: number | null; median: number | null; std: number | null; min: number | null; max: number | null; q1: number | null; q3: number | null }>;
+    categorical?: Array<{ variable: string; count: number; missing: number; unique: number; frequency: Array<{ category: string; frequency: number; percentage: number }> }>;
+    x?: string; y?: string; n?: number; r?: number; rho?: number; p_value?: number; significant?: boolean;
+    pairs?: Array<{ x: number; y: number }>;
+  };
+  warnings: string[];
+  data_fingerprint: string | null;
+  status: "ready" | "failed";
+  created_at: string;
+}
+export interface AnalysisCreateInput {
+  task_id: string;
+  dataset_id: string;
+  dataset_version?: number;
+  type: AnalysisType;
+  name?: string;
+  description?: string;
+  variables: Record<string, unknown>;
+  parameters?: Record<string, unknown>;
+}
+export async function createAnalysis(input: AnalysisCreateInput): Promise<Analysis> {
+  const res = await apiFetch(`${API_BASE}/api/analyses`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { analysis: Analysis }).analysis;
+}
+export async function listAnalyses(taskId?: string, datasetId?: string): Promise<Analysis[]> {
+  const query = new URLSearchParams();
+  if (taskId) query.set("task_id", taskId);
+  if (datasetId) query.set("dataset_id", datasetId);
+  const res = await apiFetch(`${API_BASE}/api/analyses${query.size ? `?${query.toString()}` : ""}`);
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { analyses: Analysis[] }).analyses;
+}
+export async function getAnalysis(analysisId: string): Promise<Analysis> {
+  const res = await apiFetch(`${API_BASE}/api/analyses/${encodeURIComponent(analysisId)}`);
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { analysis: Analysis }).analysis;
+}
+export async function runAnalysis(analysisId: string): Promise<{ analysis: Analysis; result: AnalysisResult }> {
+  const res = await apiFetch(`${API_BASE}/api/analyses/${encodeURIComponent(analysisId)}/run`, { method: "POST" });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function getAnalysisResult(analysisId: string, resultId?: string): Promise<AnalysisResult> {
+  const res = await apiFetch(`${API_BASE}/api/analyses/${encodeURIComponent(analysisId)}/result${resultId ? `?result_id=${encodeURIComponent(resultId)}` : ""}`);
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { result: AnalysisResult }).result;
+}
+export async function insertAnalysisResult(analysisId: string, input: { section_id: string; result_id?: string; artifact: "table" | "chart" }): Promise<{ block: unknown; analysis: Analysis; result: AnalysisResult }> {
+  const res = await apiFetch(`${API_BASE}/api/analyses/${encodeURIComponent(analysisId)}/insert`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
 export async function adaptInsightChart(taskId: string, insightId: string): Promise<DraftParagraph> {
   const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/insight/${encodeURIComponent(insightId)}/adapt-chart`, { method: "POST" });
   if (!res.ok) throw await toError(res);
