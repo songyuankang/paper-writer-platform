@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { draftChartAssetUrl, type DraftParagraph } from "../api/paper";
+import type { DraftParagraph } from "../api/paper";
 import EditableDraftChartBlock from "./EditableDraftChartBlock";
 import EditableInsightBlock from "./EditableInsightBlock";
 
@@ -112,7 +112,7 @@ export default function EditableDraftBlock({
     return <EditableInsightBlock block={block} index={index} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "chart") {
-    return <EditableDraftChartBlock block={block} index={index} assetUrl={draftChartAssetUrl(taskId, block.id)} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
+    return <EditableDraftChartBlock taskId={taskId} block={block} index={index} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "table") {
     return (

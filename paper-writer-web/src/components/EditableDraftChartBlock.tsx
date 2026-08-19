@@ -1,12 +1,12 @@
-import { useMemo, useState } from "react";
-import type { DraftParagraph } from "../api/paper";
+import { useEffect, useMemo, useState } from "react";
+import { fetchDraftChartAsset, type DraftParagraph } from "../api/paper";
 
 type ChartPatch = { title?: string; caption?: string; display_scale?: number };
 
 type Props = {
+  taskId: string;
   block: DraftParagraph;
   index: number;
-  assetUrl?: string;
   onUpdate?: (patch: ChartPatch) => Promise<void> | void;
   onRegenerate?: () => Promise<void> | void;
   onDelete: () => void;
@@ -70,15 +70,36 @@ function FallbackCanvas({ block }: { block: DraftParagraph }) {
   </svg>;
 }
 
-function ChartAsset({ block, assetUrl }: { block: DraftParagraph; assetUrl?: string }) {
+function ChartAsset({ taskId, block }: { taskId: string; block: DraftParagraph }) {
+  const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  if (assetUrl && block.asset && !failed) {
-    return <img src={assetUrl + "&v=" + String(block.version || 1)} onError={() => setFailed(true)} className="h-auto w-full" alt={text(block.title, "图表")} />;
+  const assetId = block.asset?.id;
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    setUrl(null);
+    setFailed(false);
+    if (!assetId) return () => undefined;
+    void fetchDraftChartAsset(taskId, block.id, "svg")
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (active) setUrl(objectUrl);
+      })
+      .catch(() => { if (active) setFailed(true); });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [taskId, block.id, assetId, block.version]);
+
+  if (url && !failed) {
+    return <img src={url} onError={() => setFailed(true)} className="h-auto w-full" alt={text(block.title, "图表")} />;
   }
   return <FallbackCanvas block={block} />;
 }
 
-export default function EditableDraftChartBlock({ block, index, assetUrl, onUpdate, onRegenerate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
+export default function EditableDraftChartBlock({ taskId, block, index, onUpdate, onRegenerate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(text(block.title, "图表"));
@@ -110,6 +131,6 @@ export default function EditableDraftChartBlock({ block, index, assetUrl, onUpda
     </div>
     {stale && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">{block.stale_reason || "关联论文表格已变更；请重新计算后再导出。"}</p>}
     {editing && <div className="grid gap-3 border-b border-neutral-200 bg-white px-4 py-3 sm:grid-cols-2"><label className="text-xs text-neutral-600">图表标题<input value={title} maxLength={80} onChange={(event) => setTitle(event.target.value)} onBlur={() => void savePatch({ title })} className="mt-1 w-full rounded border border-neutral-300 px-2 py-1.5 text-sm text-neutral-900" /></label><label className="text-xs text-neutral-600">图注<textarea value={caption} maxLength={180} onChange={(event) => setCaption(event.target.value)} onBlur={() => void savePatch({ caption })} className="mt-1 min-h-[60px] w-full rounded border border-neutral-300 px-2 py-1.5 text-sm text-neutral-900" /></label></div>}
-    <div className="mx-auto" style={{ width: String(scale * 100) + "%", minWidth: "min(100%, 560px)" }}><div className="px-5 pt-5 text-center"><h4 className="text-base font-semibold text-neutral-900">{block.title}</h4></div><ChartAsset block={block} assetUrl={assetUrl} /><div className="px-5 pb-4 text-center"><p className="text-sm font-medium text-neutral-800">{figureNumber} {block.title}</p><p className="mt-1 text-xs text-neutral-500">{block.caption}</p>{block.provenance !== "user_provided" && <p className="mt-1 text-xs text-amber-700">数据为模型/示意生成，未自动检索或核验外部来源。</p>}</div></div>
+    <div className="mx-auto" style={{ width: String(scale * 100) + "%", minWidth: "min(100%, 560px)" }}><div className="px-5 pt-5 text-center"><h4 className="text-base font-semibold text-neutral-900">{block.title}</h4></div><ChartAsset taskId={taskId} block={block} /><div className="px-5 pb-4 text-center"><p className="text-sm font-medium text-neutral-800">{figureNumber} {block.title}</p><p className="mt-1 text-xs text-neutral-500">{block.caption}</p>{block.provenance !== "user_provided" && <p className="mt-1 text-xs text-amber-700">数据为模型/示意生成，未自动检索或核验外部来源。</p>}</div></div>
   </article>;
 }

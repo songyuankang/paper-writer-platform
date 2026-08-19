@@ -1222,8 +1222,10 @@ export async function updateDraftChart(taskId: string, blockId: string, params: 
   if (!res.ok) throw await toError(res);
   return res.json();
 }
-export function draftChartAssetUrl(taskId: string, blockId: string, format: "svg" | "png" = "svg"): string {
-  return API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/asset?format=" + format;
+export async function fetchDraftChartAsset(taskId: string, blockId: string, format: "svg" | "png" = "svg"): Promise<Blob> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/asset?format=" + format);
+  if (!res.ok) throw await toError(res);
+  return res.blob();
 }
 
 
