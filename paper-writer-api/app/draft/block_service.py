@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.draft.chart_runtime import mark_charts_stale_for_table, upsert_table_dataset
+
 _MAX_TABLE_ROWS = 100
 _MAX_TABLE_COLS = 12
 
@@ -22,7 +24,10 @@ def _clean_rows(rows: list[Any], width: int) -> list[list[str]]:
     cleaned: list[list[str]] = []
     for row in rows:
         values = list(row) if isinstance(row, list) else []
-        cleaned.append([str(values[index]).strip() if index < len(values) else "" for index in range(width)])
+        cleaned.append([
+            str(values[index]).strip() if index < len(values) else ""
+            for index in range(width)
+        ])
     return cleaned
 
 
@@ -39,6 +44,7 @@ def add_table(service: Any, section_id: str, title: str, headers: list[Any], row
             "rows": _clean_rows(rows, len(headers_clean)),
         }
         section["paragraphs"].append(block)
+        upsert_table_dataset(draft, block)
         service.save(draft)
         return block
 
@@ -53,9 +59,13 @@ def update_block(service: Any, block_id: str, patch: dict[str, Any]) -> dict:
                 if block.get("type", "paragraph") == "table":
                     headers = _clean_headers(patch.get("headers", block.get("headers", [])))
                     block["headers"] = headers
-                    block["rows"] = _clean_rows(patch.get("rows", block.get("rows", [])), len(headers))
+                    block["rows"] = _clean_rows(
+                        patch.get("rows", block.get("rows", [])), len(headers)
+                    )
                     if "title" in patch:
                         block["title"] = str(patch["title"]).strip() or "数据表"
+                    upsert_table_dataset(draft, block)
+                    mark_charts_stale_for_table(draft, str(block.get("id") or ""))
                 elif "text" in patch:
                     block["text"] = str(patch["text"])
                 service.save(draft)

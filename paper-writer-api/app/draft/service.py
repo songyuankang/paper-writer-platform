@@ -19,6 +19,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.draft import outline as outline_mod
+from app.draft.chart_runtime import figure_sections_for_draft, recompute_chart_block, walk_sections
 from app.formatter import service as formatter_service
 from app.models.task import TaskStatus
 from app.services import deepseek, deepseek_service, model_service
@@ -885,7 +886,22 @@ class DraftService:
         """把草稿组装为 spec 并格式化出 docx。"""
         with self.lock:
             draft = self.load()
+            # Export is the final consistency boundary: regenerate every stale
+            # table-backed chart before its asset is embedded in the DOCX.
+            for section in walk_sections(draft.get("sections") or []):
+                for block in section.get("paragraphs") or []:
+                    if block.get("type") != "chart":
+                        continue
+                    binding = (block.get("chart_spec") or {}).get("binding") or {}
+                    if binding.get("source_table_id") and (
+                        block.get("status") == "stale"
+                        or not (block.get("asset") or {}).get("png_path")
+                    ):
+                        recompute_chart_block(draft, self.task_dir, block)
+            figure_sections_for_draft(draft)
+            self.save(draft)
         paper = self._paper_info(draft)
+
         spec_sections: list[dict] = []
         for s in draft["sections"]:
             htype = {1: "h1", 2: "h2", 3: "h3"}.get(s["level"], "h2")
@@ -929,35 +945,39 @@ class DraftService:
                     spec_sections.append({"type": "p", "text": f"{title}。{caption}{disclosure}{(' 证据：' + evidence_note) if evidence_note else ''}"})
                 # semantic-insight export adapter
                 elif kind == "chart":
-                    # chart-block export fallback: preserve its validated data in
-                    # the document even when a renderer-specific image asset is absent.
+                    # ChartSpec v2 owns a real PNG/SVG ChartAsset. Export its
+                    # PNG as a native FigureBlock so both DOCX renderers embed it.
+                    asset = p.get("asset") or {}
+                    png_path = str(asset.get("png_path") or "")
                     chart = p.get("chart") or {}
                     chart_title = str(p.get("title") or chart.get("title") or "图表")
-                    if chart.get("kind") == "pie":
-                        headers = ["类别", "数值"]
-                        rows = [
-                            [str(item.get("name") or ""), str(item.get("value") or "")]
-                            for item in (chart.get("pie") or [])
-                        ]
-                    else:
-                        categories = [str(item) for item in (chart.get("categories") or [])]
-                        series = chart.get("series") or []
-                        headers = ["类别"] + [str(item.get("name") or "指标") for item in series]
-                        rows = []
-                        for index, category in enumerate(categories):
-                            rows.append([category] + [str((item.get("values") or [])[index]) if len(item.get("values") or []) > index else "" for item in series])
-                    if rows:
-                        spec_sections.append({
-                            "type": "table",
-                            "title": f"图表数据：{chart_title}",
-                            "headers": headers,
-                            "rows": rows,
-                        })
+                    figure_number = str(p.get("figure_number") or "图")
                     caption = str(p.get("caption") or chart.get("caption") or "")
-                    provenance = str(p.get("provenance") or "")
-                    notice = "（模型/示意生成，未自动检索或核验外部来源）" if provenance != "user_provided" else ""
-                    spec_sections.append({"type": "p", "text": f"图：{chart_title}。{caption}{notice}"})
-                # chart-block export fallback
+                    if png_path and (self.task_dir / png_path).is_file():
+                        spec_sections.append({
+                            "type": "figure",
+                            "path": png_path,
+                            "title": f"{figure_number} {chart_title}",
+                            "chart_id": p.get("id"),
+                            "asset_id": asset.get("id"),
+                        })
+                        source_note = ((p.get("chart_spec") or {}).get("provenance") or {}).get("source_note")
+                        if caption or source_note:
+                            spec_sections.append({"type": "p", "text": "".join(value for value in [caption, source_note] if value)})
+                    else:
+                        # Preserve legacy charts that predate the asset service.
+                        if chart.get("kind") == "pie":
+                            headers = ["类别", "数值"]
+                            rows = [[str(item.get("name") or ""), str(item.get("value") or "")] for item in (chart.get("pie") or [])]
+                        else:
+                            categories = [str(item) for item in (chart.get("categories") or [])]
+                            series = chart.get("series") or []
+                            headers = ["类别"] + [str(item.get("name") or "指标") for item in series]
+                            rows = [[category] + [str((item.get("values") or [])[index]) if len(item.get("values") or []) > index else "" for item in series] for index, category in enumerate(categories)]
+                        if rows:
+                            spec_sections.append({"type": "table", "title": f"图表数据：{chart_title}", "headers": headers, "rows": rows})
+                        spec_sections.append({"type": "p", "text": f"{figure_number}：{chart_title}。{caption}"})
+                # chart-block export adapter
                 elif kind == "table":
                     spec_sections.append({
                         "type": "table",

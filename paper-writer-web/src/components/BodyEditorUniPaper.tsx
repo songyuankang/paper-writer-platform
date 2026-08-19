@@ -8,6 +8,7 @@ import {
   addDraftParagraph,
   updateDraftBlock,
   addDraftTable,
+  addDraftChart,
   createDraftInsight,
   regenerateDraftChart,
   updateDraftChart,
@@ -264,6 +265,16 @@ export default function BodyEditorUniPaper({
 
   async function addTableBlock(sectionId: string) {
     try { await addDraftTable(taskId, sectionId); await refresh(); } catch (err) { setError(err instanceof Error ? err.message : "新增表格失败"); }
+  }
+
+  async function createChart(sectionId: string) {
+    setError(null);
+    try {
+      await addDraftChart(taskId, sectionId, { chart_kind: "bar" });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "新增图表失败，请先检查本节数据表");
+    }
   }
 
   async function createInsight(sectionId: string) {
@@ -812,12 +823,14 @@ export default function BodyEditorUniPaper({
                       return (
                         <LeafSection
                           key={child.id}
+                          taskId={taskId}
                           section={child}
                           genSection={genSection}
                           onPatch={(patch) => void patchSection(child.id, patch)}
                           onGenerate={() => void handleGenerateSection(child)}
                           onAdd={() => void addPara(child.id)}
                           onAddTable={() => void addTableBlock(child.id)}
+          onCreateChart={() => void createChart(child.id)}
           onCreateInsight={() => void createInsight(child.id)}
           onChartUpdate={(id, patch) => void patchChart(id, patch)}
           onRegenerateChart={(id) => void regenerateChart(id)}
@@ -836,12 +849,14 @@ export default function BodyEditorUniPaper({
                         {grandchildren.map((g) => (
                           <LeafSection
                             key={g.id}
+                            taskId={taskId}
                             section={g}
                             genSection={genSection}
                             onPatch={(patch) => void patchSection(g.id, patch)}
                             onGenerate={() => void handleGenerateSection(g)}
                             onAdd={() => void addPara(g.id)}
                           onAddTable={() => void addTableBlock(g.id)}
+                            onCreateChart={() => void createChart(g.id)}
                             onCreateInsight={() => void createInsight(g.id)}
                             onChartUpdate={(id, patch) => void patchChart(id, patch)}
                             onRegenerateChart={(id) => void regenerateChart(id)}
@@ -1068,12 +1083,14 @@ function Block({
 
 /** 右栏叶子小节（标题 + 主旨 + 段落列表 + 操作）。 */
 function LeafSection({
+  taskId,
   section,
   genSection,
   onPatch,
   onGenerate,
   onAdd,
   onAddTable,
+  onCreateChart,
   onCreateInsight,
   onChartUpdate,
   onRegenerateChart,
@@ -1082,12 +1099,14 @@ function LeafSection({
   onDel,
   onMove,
 }: {
+  taskId: string;
   section: DraftSection;
   genSection: string | null;
   onPatch: (patch: { title?: string; gist?: string }) => void;
   onGenerate: () => void;
   onAdd: () => void;
   onAddTable: () => void;
+  onCreateChart: () => void;
   onCreateInsight: () => void;
   onChartUpdate: (id: string, patch: { title?: string; caption?: string; display_scale?: number }) => void;
   onRegenerateChart: (id: string) => void;
@@ -1118,6 +1137,7 @@ function LeafSection({
         {section.paragraphs.map((p, i) => (
           <EditableDraftBlock
             key={p.id}
+            taskId={taskId}
             block={p}
             index={i}
             onText={(text) => onPatchPara(p.id, text)}
@@ -1144,6 +1164,7 @@ function LeafSection({
           + 新增段落
         </button>
         <button type="button" onClick={onAddTable} className={BTN_GHOST}>+ 新增表格</button>
+        <button type="button" onClick={onCreateChart} className={BTN_GHOST}>+ 从表格生成图表</button>
         <button type="button" onClick={onCreateInsight} className={BTN_GHOST}>+ 总结生成</button>
       </div>
     </div>

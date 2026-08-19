@@ -585,17 +585,27 @@ export interface DraftChartSeries {
   axis: "left" | "right";
 }
 export interface DraftChartSpec {
-  schema_version: 1;
+  schema_version: 1 | 2;
   kind: "bar" | "line" | "mixed" | "pie";
   title: string;
   caption: string;
   categories?: string[];
   series?: DraftChartSeries[];
   pie?: Array<{ name: string; value: number }>;
+  data?: { categories: string[]; series: DraftChartSeries[]; pie?: Array<{ name: string; value: number }> };
+  binding?: { dataset_id?: string; dataset_version?: number; source_table_id?: string; data_fingerprint?: string };
+}
+export interface DraftChartAsset {
+  id: string;
+  png_path: string;
+  svg_path: string;
+  data_fingerprint?: string;
+  generated_at: string;
 }
 export interface DraftParagraph {
   id: string;
   text: string;
+  version?: number;
   type?: "paragraph" | "table" | "chart" | "insight";
   insight?: DraftInsightBlock;
   title?: string;
@@ -603,9 +613,14 @@ export interface DraftParagraph {
   rows?: string[][];
   caption?: string;
   chart?: DraftChartSpec;
+  chart_spec?: DraftChartSpec;
+  asset?: DraftChartAsset;
+  source_ids?: string[];
+  figure_number?: string;
+  stale_reason?: string | null;
   display_scale?: number;
   provenance?: "user_provided" | "model_generated" | "illustrative";
-  status?: "ready" | "generating" | "failed";
+  status?: "ready" | "stale" | "generating" | "failed";
 }
 export interface DraftSection {
   id: string;
@@ -1206,6 +1221,9 @@ export async function updateDraftChart(taskId: string, blockId: string, params: 
   const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) });
   if (!res.ok) throw await toError(res);
   return res.json();
+}
+export function draftChartAssetUrl(taskId: string, blockId: string, format: "svg" | "png" = "svg"): string {
+  return API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/asset?format=" + format;
 }
 
 

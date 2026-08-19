@@ -6,11 +6,14 @@ import re
 import threading
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
+
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.draft.service import DraftService
 from app.draft import block_service
+from app.draft.chart_runtime import locate_block
 from app.draft.insight_blocks import (
     InsightCreateRequest,
     InsightPatchRequest,
@@ -300,6 +303,35 @@ def patch_chart(task_id: str, block_id: str, body: ChartPatchRequest, request: R
         return patch_chart_block(_service(task_id, request), block_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/{task_id}/chart/{block_id}/asset")
+def get_chart_asset(task_id: str, block_id: str, request: Request, format: str = "svg"):
+    """Return a chart's persisted renderer asset for editor preview or download."""
+    if format not in {"svg", "png"}:
+        raise HTTPException(status_code=422, detail="图表资产格式仅支持 svg 或 png")
+    service = _service(task_id, request)
+    draft = service.load()
+    try:
+        _, block = locate_block(draft, block_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if block.get("type") != "chart":
+        raise HTTPException(status_code=422, detail="目标内容块不是图表")
+    asset = block.get("asset") or {}
+    relative = asset.get("svg_path" if format == "svg" else "png_path")
+    if not relative:
+        raise HTTPException(status_code=404, detail="图表资产尚未生成")
+    target = (service.task_dir / str(relative)).resolve()
+    charts_dir = (service.task_dir / "charts").resolve()
+    try:
+        target.relative_to(charts_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="图表资产路径无效") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="图表资产文件不存在")
+    media_type = "image/svg+xml" if format == "svg" else "image/png"
+    return FileResponse(target, media_type=media_type, filename=target.name)
 
 
 @router.post("/{task_id}/section/{section_id}/insight")
