@@ -1589,3 +1589,30 @@ export async function adaptInsightChart(taskId: string, insightId: string): Prom
   if (!res.ok) throw await toError(res);
   return res.json();
 }
+
+export interface ResearchAssistantRecommendation {
+  research_goal: string;
+  variable_roles: Array<{ variable: string; role: string }>;
+  recommended_methods: Array<{ type: AnalysisType; confidence: string; reason: string; variables: string[] }>;
+  recommended_charts: Array<{ type: string; reason: string }>;
+  required_variables: string[];
+  warnings: string[];
+}
+
+export interface ResearchAssistantResponse {
+  recommendation: ResearchAssistantRecommendation;
+  dataset: { dataset_id: string; dataset_version: number; fingerprint: string; row_count: number; schema: DatasetColumn[] };
+  provider: "configured_model" | "rule_fallback";
+}
+
+export async function getResearchAssistantRecommendation(input: { research_question: string; hypothesis?: string; dataset_id: string; dataset_version: number; model_id?: string }): Promise<ResearchAssistantResponse> {
+  const res = await apiFetch(`${API_BASE}/api/research-assistant/recommend`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function runResearchAssistantRecommendation(input: { task_id: string; dataset_id: string; dataset_version: number; method: AnalysisType; variables: Record<string, unknown>; parameters?: Record<string, unknown> }): Promise<{ analysis: Analysis; result: AnalysisResult }> {
+  const res = await apiFetch(`${API_BASE}/api/research-assistant/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}

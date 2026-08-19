@@ -19,6 +19,7 @@ from app.api.draft import router as draft_router
 from app.api.templates import router as templates_router
 from app.api.datasets import router as datasets_router
 from app.api.analyses import router as analyses_router
+from app.api.research_assistant import router as research_assistant_router
 
 from app.config import settings
 from app.db import init_db
@@ -99,6 +100,7 @@ app.include_router(draft_router)
 app.include_router(templates_router)
 app.include_router(datasets_router)
 app.include_router(analyses_router)
+app.include_router(research_assistant_router)
 
 
 if __name__ == "__main__":

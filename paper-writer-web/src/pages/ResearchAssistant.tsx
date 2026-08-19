@@ -1,0 +1,42 @@
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { AnalysisResult, AnalysisType, DatasetSummary, DatasetVersion, getDatasetVersions, getResearchAssistantRecommendation, listDatasets, ResearchAssistantResponse, runResearchAssistantRecommendation } from "../api/paper";
+
+function errorText(error: unknown) { return error instanceof Error ? error.message : "请求失败"; }
+function n(value?: number | null) { return value == null ? "—" : value.toFixed(4); }
+function variables(method: AnalysisType, names: string[]): Record<string, unknown> {
+  if (method === "descriptive") return { columns: names };
+  if (method === "pearson" || method === "spearman") return { x: names[0], y: names[1] };
+  if (method === "independent_t" || method === "anova") return { group_column: names[0], value_column: names[1] };
+  return { dependent_variable: names[0], predictors: names.slice(1) };
+}
+
+export default function ResearchAssistant() {
+  const [query] = useSearchParams();
+  const [taskId, setTaskId] = useState(query.get("task_id") || "");
+  const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
+  const [datasetId, setDatasetId] = useState("");
+  const [versions, setVersions] = useState<DatasetVersion[]>([]);
+  const [version, setVersion] = useState<number>();
+  const [question, setQuestion] = useState("");
+  const [hypothesis, setHypothesis] = useState("");
+  const [response, setResponse] = useState<ResearchAssistantResponse | null>(null);
+  const [methodIndex, setMethodIndex] = useState(0);
+  const [result, setResult] = useState<AnalysisResult | null>(null);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState(""); const [notice, setNotice] = useState("");
+  useEffect(() => { void listDatasets().then(setDatasets).catch((e) => setError(errorText(e))); }, [taskId]);
+  useEffect(() => { if (!datasetId) { setVersions([]); return; } void getDatasetVersions(datasetId).then((items) => { setVersions(items); setVersion(items[items.length - 1]?.version); }).catch((e) => setError(errorText(e))); }, [datasetId]);
+  const selected = response?.recommendation.recommended_methods[methodIndex];
+  const profile = useMemo(() => versions.find((item) => item.version === version)?.schema || [], [versions, version]);
+  async function recommend() {
+    if (!datasetId || !version || !question.trim()) { setError("请选择 DatasetVersion 并输入研究问题。"); return; }
+    setBusy(true); setError(""); setResult(null);
+    try { const data = await getResearchAssistantRecommendation({ research_question: question, hypothesis, dataset_id: datasetId, dataset_version: version }); setResponse(data); setMethodIndex(0); setNotice("已生成候选推荐；统计分析尚未运行，请确认后点击运行。"); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
+  }
+  async function run() {
+    if (!selected || !datasetId || !version || !taskId) { setError("需要任务 ID、DatasetVersion 与已选择的推荐方法。"); return; }
+    setBusy(true); setError("");
+    try { const data = await runResearchAssistantRecommendation({ task_id: taskId, dataset_id: datasetId, dataset_version: version, method: selected.type, variables: variables(selected.type, selected.variables) }); setResult(data.result); setNotice("已按用户确认调用既有 Analysis 引擎，以下为真实 AnalysisResult。" ); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
+  }
+  return <div className="min-h-screen bg-slate-100 text-slate-900"><header className="border-b bg-white px-5 py-3"><div className="mx-auto flex max-w-[1800px] items-center gap-3"><Link to={`/research/data${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`} className="text-sm text-slate-500">← 研究数据中心</Link><h1 className="mr-auto text-lg font-semibold">AI 研究方法助手</h1><input value={taskId} onChange={(e) => setTaskId(e.target.value.trim())} placeholder="32 位论文任务 ID" className="w-64 rounded border p-2 text-sm" /></div></header><main className="mx-auto grid max-w-[1800px] grid-cols-1 gap-4 p-4 xl:grid-cols-[300px_minmax(450px,1fr)_420px]"><aside className="space-y-4 rounded-xl border bg-white p-4"><h2 className="font-semibold">当前 Dataset</h2><select value={datasetId} onChange={(e) => setDatasetId(e.target.value)} className="w-full rounded border p-2 text-sm"><option value="">选择数据集</option>{datasets.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.row_count} 行</option>)}</select><select value={version || ""} onChange={(e) => setVersion(Number(e.target.value))} className="mt-2 w-full rounded border p-2 text-sm" disabled={!datasetId}><option value="">选择版本</option>{versions.map((item) => <option key={item.version} value={item.version}>Dataset v{item.version}</option>)}</select><div className="mt-4 space-y-2">{profile.map((field) => <div key={field.name} className="rounded border bg-slate-50 p-2 text-sm"><b>{field.name}</b><span className="float-right text-xs text-slate-500">{field.type}</span><p className="mt-1 text-xs text-slate-500">缺失 {field.missing_count} · 唯一 {field.unique_count}</p></div>)}</div></aside><section className="rounded-xl border bg-white p-5"><h2 className="font-semibold">研究问题</h2><textarea value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="例如：不同学历是否影响满意度？" className="mt-3 min-h-36 w-full rounded border p-3" /><textarea value={hypothesis} onChange={(e) => setHypothesis(e.target.value)} placeholder="研究假设（可选）" className="mt-3 min-h-24 w-full rounded border p-3" /><button onClick={() => void recommend()} disabled={busy} className="mt-3 rounded bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50">生成方法推荐</button><div className="mt-6 rounded border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900"><b>安全边界：</b>助手只读取变量 Schema/Profile，不上传完整 Dataset rows；推荐不会计算或生成任何 N、p、F、r、R² 等统计数字。真正计算只能在确认后由现有 Analysis 引擎执行。</div></section><aside className="space-y-4"><section className="rounded-xl border bg-white p-4"><h2 className="mb-3 font-semibold">AI 推荐</h2>{response ? <><p className="text-sm"><b>研究目标：</b>{response.recommendation.research_goal}</p><p className="mt-2 text-sm"><b>变量角色：</b>{response.recommendation.variable_roles.map((item) => `${item.variable} (${item.role})`).join("、")}</p><label className="mt-4 block text-sm font-medium">候选方法<select value={methodIndex} onChange={(e) => setMethodIndex(Number(e.target.value))} className="mt-1 w-full rounded border p-2">{response.recommendation.recommended_methods.map((item, index) => <option key={`${item.type}-${index}`} value={index}>{item.type} · {item.confidence}</option>)}</select></label>{selected && <div className="mt-3 rounded bg-slate-50 p-3 text-sm"><p><b>{selected.type}</b>：{selected.reason}</p><p className="mt-2">依赖变量：{selected.variables.join("、")}</p></div>}<div className="mt-3 text-sm"><b>推荐图表：</b>{response.recommendation.recommended_charts.map((item) => `${item.type}（${item.reason}）`).join("；")}</div>{response.recommendation.warnings.length > 0 && <div className="mt-3 rounded bg-amber-50 p-3 text-sm text-amber-800">{response.recommendation.warnings.join("；")}</div>}<div className="mt-4 flex gap-2"><button onClick={() => void run()} disabled={busy || !taskId} className="rounded bg-blue-600 px-3 py-2 text-sm text-white disabled:opacity-50">运行</button><Link to={`/research/analysis?task_id=${encodeURIComponent(taskId)}`} className="rounded border px-3 py-2 text-sm">调整变量</Link><button onClick={() => { setMethodIndex((methodIndex + 1) % Math.max(1, response.recommendation.recommended_methods.length)); }} className="rounded border px-3 py-2 text-sm">换一种方法</button></div></> : <p className="text-sm text-slate-500">输入问题后显示结构化推荐；不会自动运行分析。</p>}</section>{result && <section className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900"><b>真实 AnalysisResult</b><p className="mt-2">方法：{result.result.method} · 状态：{result.status}</p><p>数据版本：v{result.dataset_version} · 指纹：{result.data_fingerprint?.slice(0, 12)}</p>{result.result.method === "anova" && <p>F={n(result.result.f_statistic)}，p={n(result.result.p_value)}</p>}{result.result.method === "pearson" && <p>r={n(result.result.r)}，p={n(result.result.p_value)}</p>}{result.result.method === "regression" && <p>R²={n(result.result.r_squared)}，F p={n(result.result.f_p_value)}</p>}</section>}{(error || notice) && <div className={`rounded-xl border p-3 text-sm ${error ? "border-red-200 bg-red-50 text-red-700" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>{error || notice}</div>}</aside></main></div>;
+}
