@@ -17,6 +17,8 @@ from app.api.format_task import router as format_router
 from app.api.polish import router as polish_router
 from app.api.draft import router as draft_router
 from app.api.templates import router as templates_router
+from app.api.datasets import router as datasets_router
+
 from app.config import settings
 from app.db import init_db
 from app.formatter import template_manager
@@ -94,6 +96,7 @@ app.include_router(format_router)
 app.include_router(polish_router)
 app.include_router(draft_router)
 app.include_router(templates_router)
+app.include_router(datasets_router)
 
 
 if __name__ == "__main__":

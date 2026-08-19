@@ -16,7 +16,9 @@ from app.draft import block_service
 from app.draft.chart_runtime import (
     adapt_insight_chart,
     create_lab_chart,
+    create_lab_chart_from_dataset,
     dataset_by_id,
+    external_dataset_version,
     dataset_profile,
     insert_chart_into_section,
     locate_block,
@@ -43,6 +45,7 @@ from app.draft.chart_blocks import (
     regenerate_chart_block,
 )
 from app.services import history_service
+from app.services.dataset_service import DatasetService
 
 router = APIRouter(prefix="/api/draft", tags=["draft"])
 _TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -103,7 +106,10 @@ class OutlineAddRequest(BaseModel):
 
 
 class LabChartCreateRequest(BaseModel):
-    table_id: str = Field(..., min_length=1, max_length=160)
+    table_id: str | None = Field(default=None, max_length=160)
+    dataset_id: str | None = Field(default=None, max_length=160)
+    dataset_version: int | None = Field(default=None, ge=1)
+    source_type: str = Field(default="table_block", pattern="^(table_block|research_dataset)$")
     title_hint: str = Field("", max_length=100)
     chart_kind: str = Field("bar", max_length=32)
 
@@ -318,6 +324,10 @@ def export(task_id: str, request: Request,
     return {"ok": True, "files": files}
 
 
+def _research_dataset_loader(dataset_id: str, version: int | None) -> dict:
+    return DatasetService(settings).get_version(dataset_id, version, include_rows=True)
+
+
 def _lab_chart_summary(block: dict) -> dict:
     spec = block.get("chart_spec") or {}
     binding = spec.get("binding") or {}
@@ -352,13 +362,19 @@ def get_lab_state(task_id: str, request: Request) -> dict:
         if block.get("type") == "chart":
             charts.append(_lab_chart_summary(block))
     sections = [{"id": item.get("id"), "number": item.get("number", ""), "title": item.get("title", "")} for item in walk_sections(draft.get("sections") or [])]
-    return {"datasets": draft.get("datasets") or [], "charts": charts, "sections": sections, "templates": [{"id": key, **value} for key, value in {"academic": {"label": "学术论文"}, "cn_thesis": {"label": "中文毕业论文"}, "clean_report": {"label": "简洁报告"}}.items()]}
+    research_datasets = DatasetService(settings).list_datasets(task_id)
+    return {"datasets": draft.get("datasets") or [], "research_datasets": research_datasets, "charts": charts, "sections": sections, "templates": [{"id": key, **value} for key, value in {"academic": {"label": "学术论文"}, "cn_thesis": {"label": "中文毕业论文"}, "clean_report": {"label": "简洁报告"}}.items()]}
 
 
 @router.get("/{task_id}/lab/datasets/{dataset_id}")
-def get_lab_dataset(task_id: str, dataset_id: str, request: Request, limit: int = 50, offset: int = 0) -> dict:
+def get_lab_dataset(task_id: str, dataset_id: str, request: Request, limit: int = 50, offset: int = 0, version: int | None = None) -> dict:
     draft = _service(task_id, request).load()
     try:
+        if dataset_id.startswith("ds_"):
+            external = external_dataset_version(_research_dataset_loader(dataset_id, version))
+            result = dataset_profile(external, limit=limit, offset=offset)
+            result["source_type"] = "research_dataset"
+            return result
         return dataset_profile(dataset_by_id(draft, dataset_id), limit=limit, offset=offset)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -381,7 +397,15 @@ def create_lab_chart_endpoint(task_id: str, body: LabChartCreateRequest, request
         with service.lock:
             draft = service.load()
             chart_id = "chart_" + __import__("uuid").uuid4().hex[:12]
-            block = create_lab_chart(draft, service.task_dir, chart_id, body.table_id, body.title_hint, body.chart_kind)
+            if body.source_type == "research_dataset":
+                if not body.dataset_id:
+                    raise ValueError("请选择研究数据集")
+                dataset = external_dataset_version(_research_dataset_loader(body.dataset_id, body.dataset_version))
+                block = create_lab_chart_from_dataset(draft, service.task_dir, chart_id, dataset, body.title_hint, body.chart_kind)
+            else:
+                if not body.table_id:
+                    raise ValueError("请选择论文表格")
+                block = create_lab_chart(draft, service.task_dir, chart_id, body.table_id, body.title_hint, body.chart_kind)
             service.save(draft)
             return block
     except ValueError as exc:
@@ -394,7 +418,7 @@ def patch_lab_chart(task_id: str, chart_id: str, body: LabChartPatchRequest, req
     try:
         with service.lock:
             draft = service.load()
-            block = update_chart_configuration(draft, service.task_dir, chart_id, body.model_dump(exclude_none=True))
+            block = update_chart_configuration(draft, service.task_dir, chart_id, body.model_dump(exclude_none=True), _research_dataset_loader)
             service.save(draft)
             return block
     except ValueError as exc:
@@ -408,7 +432,7 @@ def recompute_lab_chart(task_id: str, chart_id: str, body: LabChartRecomputeRequ
         with service.lock:
             draft = service.load()
             _, block, _ = locate_chart(draft, chart_id)
-            recompute_chart_block(draft, service.task_dir, block, body.chart_kind)
+            recompute_chart_block(draft, service.task_dir, block, body.chart_kind, _research_dataset_loader)
             service.save(draft)
             return block
     except ValueError as exc:

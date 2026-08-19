@@ -1274,11 +1274,79 @@ export interface LabDataset {
   title: string;
   version: number;
   row_count: number;
-  source_table_id: string;
+  source_type?: "table_block" | "research_dataset";
+  source_table_id?: string | null;
   fingerprint: string;
   schema: Array<{ name: string; kind: "number" | "string"; position: number }>;
 }
+export interface DatasetColumn {
+  name: string;
+  type: "numeric" | "categorical" | "boolean" | "datetime" | "text";
+  nullable: boolean;
+  unique_count: number;
+  missing_count: number;
+  stats?: { mean: number; median: number; min: number; max: number; std: number } | null;
+  warnings: string[];
+}
+export interface DatasetQuality {
+  sample_size: number;
+  variable_count: number;
+  duplicate_rows: number;
+  columns: DatasetColumn[];
+  warnings: string[];
+}
+export interface DatasetVersion {
+  dataset_id: string;
+  version: number;
+  schema: DatasetColumn[];
+  row_count: number;
+  fingerprint: string;
+  source: { filename: string; extension: "csv" | "xlsx"; encoding?: string; sheet?: string };
+  rows_path: string;
+  source_path: string;
+  quality: DatasetQuality;
+  created_at: string;
+  dataset_name?: string;
+  deduplicated?: boolean;
+}
+export interface DatasetSummary {
+  id: string;
+  name: string;
+  description: string;
+  source_type: "csv" | "xlsx";
+  created_at: string;
+  updated_at: string;
+  latest_version: number;
+  task_ids: string[];
+  row_count: number;
+  variable_count: number;
+  latest_source: DatasetVersion["source"];
+}
+export interface DatasetPreview {
+  dataset_id: string;
+  version: number;
+  schema: DatasetColumn[];
+  quality: DatasetQuality;
+  rows: Array<Record<string, string>>;
+  row_count: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+export interface DatasetImportSelection {
+  status: "sheet_selection_required";
+  import_token: string;
+  filename: string;
+  source_type: "xlsx";
+  sheets: string[];
+  requires_sheet_selection: true;
+}
+export interface DatasetImportComplete {
+  status: "imported";
+  dataset: DatasetVersion;
+}
 export interface LabBinding {
+  source_type?: "table_block" | "research_dataset";
   dataset_id?: string;
   dataset_version?: number;
   source_table_id?: string;
@@ -1320,6 +1388,7 @@ export interface LabChart {
 }
 export interface LabState {
   datasets: LabDataset[];
+  research_datasets: DatasetSummary[];
   charts: Array<Omit<LabChart, "chart_spec"> & { dataset_id?: string; source_table_id?: string }>;
   sections: Array<{ id: string; number: string; title: string }>;
   templates: Array<{ id: string; label: string }>;
@@ -1338,8 +1407,9 @@ export async function getLabState(taskId: string): Promise<LabState> {
   if (!res.ok) throw await toError(res);
   return res.json();
 }
-export async function getLabDataset(taskId: string, datasetId: string, limit = 50, offset = 0): Promise<LabDatasetPreview> {
-  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/datasets/${encodeURIComponent(datasetId)}?limit=${limit}&offset=${offset}`);
+export async function getLabDataset(taskId: string, datasetId: string, limit = 50, offset = 0, version?: number): Promise<LabDatasetPreview> {
+  const versionQuery = version ? `&version=${encodeURIComponent(version)}` : "";
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/datasets/${encodeURIComponent(datasetId)}?limit=${limit}&offset=${offset}${versionQuery}`);
   if (!res.ok) throw await toError(res);
   return res.json();
 }
@@ -1348,7 +1418,7 @@ export async function getLabChart(taskId: string, chartId: string): Promise<LabC
   if (!res.ok) throw await toError(res);
   return res.json();
 }
-export async function createLabChart(taskId: string, input: { table_id: string; title_hint?: string; chart_kind?: LabChartKind }): Promise<LabChart> {
+export async function createLabChart(taskId: string, input: { source_type?: "table_block" | "research_dataset"; table_id?: string; dataset_id?: string; dataset_version?: number; title_hint?: string; chart_kind?: LabChartKind }): Promise<LabChart> {
   const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/charts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
   if (!res.ok) throw await toError(res);
   return res.json();
@@ -1368,6 +1438,55 @@ export async function insertLabChart(taskId: string, chartId: string, section_id
   if (!res.ok) throw await toError(res);
   return res.json();
 }
+export async function inspectDatasetUpload(file: File): Promise<DatasetImportSelection | DatasetImportComplete> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await apiFetch(`${API_BASE}/api/datasets/import`, { method: "POST", body: form });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function importDataset(input: { file?: File; import_token?: string; source_filename?: string; name?: string; description?: string; dataset_id?: string; sheet?: string; task_id?: string }): Promise<DatasetImportSelection | DatasetImportComplete> {
+  const form = new FormData();
+  if (input.file) form.append("file", input.file);
+  if (input.import_token) form.append("import_token", input.import_token);
+  if (input.source_filename) form.append("source_filename", input.source_filename);
+  if (input.name) form.append("name", input.name);
+  if (input.description) form.append("description", input.description);
+  if (input.dataset_id) form.append("dataset_id", input.dataset_id);
+  if (input.sheet) form.append("sheet", input.sheet);
+  if (input.task_id) form.append("task_id", input.task_id);
+  const res = await apiFetch(`${API_BASE}/api/datasets/import`, { method: "POST", body: form });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function listDatasets(taskId?: string): Promise<DatasetSummary[]> {
+  const res = await apiFetch(`${API_BASE}/api/datasets${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`);
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { datasets: DatasetSummary[] }).datasets;
+}
+export async function getDataset(datasetId: string): Promise<{ summary: DatasetSummary; versions: DatasetVersion[] } & Record<string, unknown>> {
+  const res = await apiFetch(`${API_BASE}/api/datasets/${encodeURIComponent(datasetId)}`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function getDatasetVersions(datasetId: string): Promise<DatasetVersion[]> {
+  const res = await apiFetch(`${API_BASE}/api/datasets/${encodeURIComponent(datasetId)}/versions`);
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { versions: DatasetVersion[] }).versions;
+}
+export async function getDatasetPreview(datasetId: string, version: number, limit = 50, offset = 0): Promise<DatasetPreview> {
+  const res = await apiFetch(`${API_BASE}/api/datasets/${encodeURIComponent(datasetId)}/versions/${version}/preview?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function attachDataset(datasetId: string, taskId: string): Promise<DatasetSummary> {
+  const form = new FormData();
+  form.append("task_id", taskId);
+  const res = await apiFetch(`${API_BASE}/api/datasets/${encodeURIComponent(datasetId)}/attach`, { method: "POST", body: form });
+  if (!res.ok) throw await toError(res);
+  return ((await res.json()) as { dataset: DatasetSummary }).dataset;
+}
+
 export async function adaptInsightChart(taskId: string, insightId: string): Promise<DraftParagraph> {
   const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/insight/${encodeURIComponent(insightId)}/adapt-chart`, { method: "POST" });
   if (!res.ok) throw await toError(res);

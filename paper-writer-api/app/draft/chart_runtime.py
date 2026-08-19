@@ -14,7 +14,7 @@ import statistics
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 ChartKind = Literal[
     "bar", "line", "pie", "scatter", "area", "boxplot", "histogram", "heatmap", "combo"
@@ -174,6 +174,28 @@ def dataset_for_table(draft: dict[str, Any], table: dict[str, Any]) -> dict[str,
     return upsert_table_dataset(draft, table)
 
 
+def external_dataset_version(version: dict[str, Any]) -> dict[str, Any]:
+    """Adapt a file-backed research DatasetVersion to the existing renderer input.
+
+    Rows are loaded only by the backend service. The returned object is ephemeral
+    and is never copied into draft.json.
+    """
+    schema = []
+    for index, column in enumerate(version.get("schema") or []):
+        column_type = str(column.get("type") or column.get("kind") or "text")
+        schema.append({
+            "name": column.get("name"), "kind": "number" if column_type == "numeric" else "string",
+            "position": index, "dataset_type": column_type,
+        })
+    return {
+        "id": version["dataset_id"], "schema_version": 1, "source_type": "research_dataset",
+        "source_table_id": None, "version": version["version"],
+        "title": version.get("dataset_name") or "研究数据集", "schema": schema,
+        "rows": version.get("rows") or [], "row_count": version.get("row_count", 0),
+        "fingerprint": version["fingerprint"], "updated_at": version.get("created_at"),
+    }
+
+
 def dataset_by_id(draft: dict[str, Any], dataset_id: str) -> dict[str, Any]:
     dataset = next((item for item in draft.get("datasets") or [] if item.get("id") == dataset_id), None)
     if dataset is None:
@@ -245,7 +267,8 @@ def normalize_binding(dataset: dict[str, Any], raw: dict[str, Any] | None = None
     return {
         "dataset_id": dataset["id"],
         "dataset_version": dataset["version"],
-        "source_table_id": dataset["source_table_id"],
+        "source_type": dataset.get("source_type", "table_block"),
+        "source_table_id": dataset.get("source_table_id"),
         "category_column": category,
         "measure_columns": measures[:6],
         "series_column": series_column,
@@ -376,7 +399,7 @@ def chart_spec_from_dataset(
         "binding": binding,
         "data": data,
         "appearance": normalize_appearance(appearance, safe_kind),
-        "provenance": {"status": "user_provided", "source_note": "数据来源：论文内用户维护的数据表。"},
+        "provenance": {"status": "user_provided", "source_note": "数据来源：研究数据集。" if dataset.get("source_type") == "research_dataset" else "数据来源：论文内用户维护的数据表。"},
     }
     if safe_kind == "pie":
         first = data["series"][0] if data["series"] else {"values": []}
@@ -518,16 +541,35 @@ def _compatibility_chart(spec: dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": 2, "kind": spec["kind"], "title": spec["title"], "caption": spec["caption"], **data}
 
 
-def recompute_chart_block(draft: dict[str, Any], task_dir: Path, block: dict[str, Any], kind: str | None = None) -> dict[str, Any]:
-    old_spec = block.get("chart_spec") or {}
-    old_binding = old_spec.get("binding") or {}
-    table_id = old_binding.get("source_table_id") or ((block.get("source_ids") or [None])[0])
+def resolve_bound_dataset(draft: dict[str, Any], binding: dict[str, Any], dataset_loader: Callable[[str, int | None], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Resolve either a task-local TableBlock dataset or a file-backed DatasetVersion."""
+    if binding.get("source_type") == "research_dataset":
+        if dataset_loader is None:
+            raise ValueError("研究数据集需要由数据中心服务加载")
+        dataset_id = str(binding.get("dataset_id") or "")
+        if not dataset_id:
+            raise ValueError("图表没有研究数据集绑定")
+        version = binding.get("dataset_version")
+        return external_dataset_version(dataset_loader(dataset_id, int(version) if version else None))
+    table_id = binding.get("source_table_id")
     if not table_id:
-        raise ValueError("图表没有可重新计算的数据表绑定")
+        raise ValueError("图表没有可用的数据源绑定")
     _, table = locate_block(draft, str(table_id))
     if table.get("type") != "table":
         raise ValueError("图表绑定的数据表已不存在")
-    dataset = upsert_table_dataset(draft, table)
+    return upsert_table_dataset(draft, table)
+
+
+def _source_ids(dataset: dict[str, Any]) -> list[str]:
+    return [str(dataset["source_table_id"])] if dataset.get("source_table_id") else []
+
+
+def recompute_chart_block(draft: dict[str, Any], task_dir: Path, block: dict[str, Any], kind: str | None = None, dataset_loader: Callable[[str, int | None], dict[str, Any]] | None = None) -> dict[str, Any]:
+    old_spec = block.get("chart_spec") or {}
+    old_binding = dict(old_spec.get("binding") or {})
+    if not old_binding.get("source_table_id") and (block.get("source_ids") or []):
+        old_binding["source_table_id"] = (block.get("source_ids") or [None])[0]
+    dataset = resolve_bound_dataset(draft, old_binding, dataset_loader)
     chart_id = str(block.get("id") or "")
     if not chart_id:
         raise ValueError("图表缺少稳定 ID")
@@ -542,23 +584,23 @@ def recompute_chart_block(draft: dict[str, Any], task_dir: Path, block: dict[str
     block.update({
         "status": "ready", "version": version, "title": spec["title"], "caption": spec["caption"],
         "chart_spec": spec, "chart": _compatibility_chart(spec), "asset": asset,
-        "source_ids": [dataset["source_table_id"]], "provenance": "user_provided",
+        "source_ids": _source_ids(dataset), "provenance": "user_provided",
         "stale_reason": None, "updated_at": now(),
     })
     return block
 
 
-def update_chart_configuration(draft: dict[str, Any], task_dir: Path, chart_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-    """Update ChartSpec binding/visual configuration and render a new ChartAsset."""
+def update_chart_configuration(draft: dict[str, Any], task_dir: Path, chart_id: str, patch: dict[str, Any], dataset_loader: Callable[[str, int | None], dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Update ChartSpec and render a new asset from either supported Dataset source."""
     _, block, _ = locate_chart(draft, chart_id)
     old = block.get("chart_spec") or {}
     binding = dict(old.get("binding") or {})
     binding.update(patch.get("binding") or {})
-    source_table_id = binding.get("source_table_id") or ((block.get("source_ids") or [None])[0])
-    if not source_table_id:
-        raise ValueError("图表没有可编辑的数据表绑定")
-    _, table = locate_block(draft, str(source_table_id))
-    dataset = upsert_table_dataset(draft, table)
+    if not binding.get("source_type") and binding.get("source_table_id"):
+        binding["source_type"] = "table_block"
+    if not binding.get("source_table_id") and (block.get("source_ids") or []) and binding.get("source_type") != "research_dataset":
+        binding["source_table_id"] = (block.get("source_ids") or [None])[0]
+    dataset = resolve_bound_dataset(draft, binding, dataset_loader)
     appearance = dict(old.get("appearance") or {})
     appearance.update(patch.get("appearance") or {})
     title = clean(patch.get("title") if patch.get("title") is not None else block.get("title"), 100)
@@ -570,7 +612,7 @@ def update_chart_configuration(draft: dict[str, Any], task_dir: Path, chart_id: 
     block.update({
         "status": "ready", "version": version, "title": spec["title"], "caption": spec["caption"],
         "chart_spec": spec, "chart": _compatibility_chart(spec), "asset": render_chart_assets(task_dir, chart_id, version, spec),
-        "source_ids": [dataset["source_table_id"]], "stale_reason": None, "updated_at": now(),
+        "source_ids": _source_ids(dataset), "stale_reason": None, "updated_at": now(),
     })
     return block
 
@@ -589,10 +631,22 @@ def create_chart_block_from_table(draft: dict[str, Any], task_dir: Path, section
         "id": chart_id, "type": "chart", "status": "ready", "version": 1, "text": "",
         "title": spec["title"], "caption": spec["caption"], "chart_spec": spec,
         "chart": _compatibility_chart(spec), "asset": render_chart_assets(task_dir, chart_id, 1, spec),
-        "display_scale": display_scale, "provenance": "user_provided", "source_ids": [dataset["source_table_id"]],
+        "display_scale": display_scale, "provenance": "user_provided", "source_ids": _source_ids(dataset),
         "in_paper": inserted, "generated_at": now(),
     }
     return block
+
+
+def create_chart_block_from_dataset(task_dir: Path, dataset: dict[str, Any], chart_id: str, kind: str, title_hint: str = "", display_scale: float = .75, inserted: bool = False) -> dict[str, Any]:
+    """Create a chart from an already loaded independent DatasetVersion."""
+    spec = chart_spec_from_dataset(dataset, chart_id, kind, title_hint)
+    return {
+        "id": chart_id, "type": "chart", "status": "ready", "version": 1, "text": "",
+        "title": spec["title"], "caption": spec["caption"], "chart_spec": spec,
+        "chart": _compatibility_chart(spec), "asset": render_chart_assets(task_dir, chart_id, 1, spec),
+        "display_scale": display_scale, "provenance": "user_provided", "source_ids": [],
+        "in_paper": inserted, "generated_at": now(),
+    }
 
 
 def create_lab_chart(draft: dict[str, Any], task_dir: Path, chart_id: str, table_id: str, title_hint: str = "", kind: str = "bar") -> dict[str, Any]:
@@ -600,6 +654,12 @@ def create_lab_chart(draft: dict[str, Any], task_dir: Path, chart_id: str, table
     if table.get("type") != "table":
         raise ValueError("请选择论文中的数据表")
     block = create_chart_block_from_table(draft, task_dir, section, chart_id, kind, title_hint, .75, table_id, inserted=False)
+    draft.setdefault("chart_library", []).append(block)
+    return block
+
+
+def create_lab_chart_from_dataset(draft: dict[str, Any], task_dir: Path, chart_id: str, dataset: dict[str, Any], title_hint: str = "", kind: str = "bar") -> dict[str, Any]:
+    block = create_chart_block_from_dataset(task_dir, dataset, chart_id, kind, title_hint, inserted=False)
     draft.setdefault("chart_library", []).append(block)
     return block
 

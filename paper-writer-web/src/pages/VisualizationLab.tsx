@@ -8,6 +8,7 @@ import {
   getLabChart,
   getLabDataset,
   getLabState,
+  getDatasetVersions,
   insertLabChart,
   type LabAppearance,
   type LabBinding,
@@ -16,6 +17,7 @@ import {
   type LabDatasetPreview,
   type LabFilterOperator,
   type LabState,
+  type DatasetVersion,
   recomputeLabChart,
   updateLabChart,
 } from "../api/paper";
@@ -58,7 +60,10 @@ export default function VisualizationLab() {
   const { taskId = "" } = useParams();
   const [state, setState] = useState<LabState | null>(null);
   const [preview, setPreview] = useState<LabDatasetPreview | null>(null);
+  const [sourceType, setSourceType] = useState<"table_block" | "research_dataset">("table_block");
   const [datasetId, setDatasetId] = useState("");
+  const [datasetVersion, setDatasetVersion] = useState<number | undefined>(undefined);
+  const [researchVersions, setResearchVersions] = useState<DatasetVersion[]>([]);
   const [chart, setChart] = useState<LabChart | null>(null);
   const [binding, setBinding] = useState<LabBinding>({ aggregation: "none", filters: [] });
   const [appearance, setAppearance] = useState<LabAppearance>({ template: "academic", legend: true, grid: true });
@@ -68,7 +73,9 @@ export default function VisualizationLab() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
-  const selectedDataset = useMemo(() => state?.datasets.find((item) => item.id === datasetId) || null, [state, datasetId]);
+  const selectedDataset = useMemo(() => sourceType === "research_dataset"
+    ? state?.research_datasets.find((item) => item.id === datasetId) || null
+    : state?.datasets.find((item) => item.id === datasetId) || null, [state, datasetId, sourceType]);
   const fields = preview?.fields || [];
   const categoryFields = fields.filter((field) => field.kind === "string");
   const measureFields = fields.filter((field) => field.kind === "number");
@@ -76,8 +83,14 @@ export default function VisualizationLab() {
   async function refresh(selectChartId?: string) {
     const next = await getLabState(taskId);
     setState(next);
-    const nextDataset = datasetId && next.datasets.some((item) => item.id === datasetId) ? datasetId : next.datasets[0]?.id || "";
-    setDatasetId(nextDataset);
+    const currentExists = sourceType === "research_dataset"
+      ? next.research_datasets.some((item) => item.id === datasetId)
+      : next.datasets.some((item) => item.id === datasetId);
+    if (!currentExists) {
+      if (next.datasets.length) { setSourceType("table_block"); setDatasetId(next.datasets[0].id); setDatasetVersion(undefined); }
+      else if (next.research_datasets.length) { setSourceType("research_dataset"); setDatasetId(next.research_datasets[0].id); setDatasetVersion(next.research_datasets[0].latest_version); }
+      else { setDatasetId(""); setDatasetVersion(undefined); }
+    }
     setInsertSectionId((current) => current || next.sections[0]?.id || "");
     const chartId = selectChartId || chart?.id;
     if (chartId) {
@@ -86,12 +99,27 @@ export default function VisualizationLab() {
     }
   }
   function syncConfig(next: LabChart) {
-    setBinding(next.chart_spec.binding || {});
+    const nextBinding = next.chart_spec.binding || {};
+    setBinding(nextBinding);
+    if (nextBinding.source_type === "research_dataset" && nextBinding.dataset_id) {
+      setSourceType("research_dataset"); setDatasetId(nextBinding.dataset_id); setDatasetVersion(nextBinding.dataset_version);
+    } else if (nextBinding.source_table_id) {
+      setSourceType("table_block"); setDatasetId(nextBinding.dataset_id || ""); setDatasetVersion(undefined);
+    }
     setAppearance(next.chart_spec.appearance || {});
     setFilters((next.chart_spec.binding?.filters || []).map((item) => ({ column: item.column, operator: item.operator, value: Array.isArray(item.value) ? item.value.join(",") : String(item.value ?? "") })));
   }
   useEffect(() => { if (taskId) void refresh().catch((err) => setError(message(err, "无法加载 Visualization Lab"))); }, [taskId]);
-  useEffect(() => { if (datasetId) void getLabDataset(taskId, datasetId, 50, 0).then(setPreview).catch((err) => setError(message(err, "无法加载数据集预览"))); }, [taskId, datasetId]);
+  useEffect(() => {
+    if (sourceType !== "research_dataset" || !datasetId) { setResearchVersions([]); return; }
+    void getDatasetVersions(datasetId).then((versions) => {
+      setResearchVersions(versions);
+      setDatasetVersion((current) => current && versions.some((item) => item.version === current) ? current : versions[versions.length - 1]?.version);
+    }).catch((err) => setError(message(err, "无法加载数据集版本")));
+  }, [datasetId, sourceType]);
+  useEffect(() => {
+    if (datasetId) void getLabDataset(taskId, datasetId, 50, 0, sourceType === "research_dataset" ? datasetVersion : undefined).then(setPreview).catch((err) => setError(message(err, "无法加载数据集预览")));
+  }, [taskId, datasetId, datasetVersion, sourceType]);
 
   async function chooseChart(chartId: string) {
     try { const next = await getLabChart(taskId, chartId); setChart(next); syncConfig(next); setNotice(""); } catch (err) { setError(message(err, "无法读取图表配置")); }
@@ -100,7 +128,9 @@ export default function VisualizationLab() {
     if (!selectedDataset) return;
     setBusy(true); setError("");
     try {
-      const next = await createLabChart(taskId, { table_id: selectedDataset.source_table_id, chart_kind: "bar" });
+      const next = await createLabChart(taskId, sourceType === "research_dataset"
+        ? { source_type: "research_dataset", dataset_id: datasetId, dataset_version: datasetVersion, chart_kind: "bar" }
+        : { source_type: "table_block", table_id: state?.datasets.find((item) => item.id === datasetId)?.source_table_id || undefined, chart_kind: "bar" });
       setChart(next); syncConfig(next); setNotice("已在图表库中创建。请在右侧配置字段后保存，再插入论文。");
       await refresh(next.id);
     } catch (err) { setError(message(err, "创建图表失败")); } finally { setBusy(false); }
@@ -120,7 +150,7 @@ export default function VisualizationLab() {
     if (!chart) return;
     setBusy(true); setError("");
     try {
-      const next = await updateLabChart(taskId, chart.id, { kind: chart.chart_spec.kind, binding: { ...binding, filters: requestFilters() }, appearance, title: chart.title, caption: chart.caption });
+      const next = await updateLabChart(taskId, chart.id, { kind: chart.chart_spec.kind, binding: { ...binding, source_type: sourceType, dataset_id: datasetId, dataset_version: sourceType === "research_dataset" ? datasetVersion : binding.dataset_version, filters: requestFilters() }, appearance, title: chart.title, caption: chart.caption });
       setChart(next); syncConfig(next); setNotice("配置已保存，ChartSpec 与 ChartAsset 已在服务端更新。");
       await refresh(next.id);
     } catch (err) { setError(message(err, "保存配置失败")); } finally { setBusy(false); }
@@ -158,7 +188,8 @@ export default function VisualizationLab() {
     <main className="mx-auto grid max-w-[1800px] grid-cols-1 gap-4 p-4 xl:grid-cols-[320px_minmax(480px,1fr)_360px]">
       <aside className="space-y-4 xl:sticky xl:top-[76px] xl:max-h-[calc(100vh-92px)] xl:overflow-auto">
         <section className="rounded-xl border bg-white p-4 shadow-sm"><div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">数据集与字段</h2><button onClick={() => void createChart()} disabled={!selectedDataset || busy} className="rounded bg-blue-600 px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-40">+ 新建图表</button></div>
-          <select value={datasetId} onChange={(event) => setDatasetId(event.target.value)} className="mb-3 w-full rounded border border-slate-300 bg-white p-2 text-sm">{(state?.datasets || []).map((item) => <option key={item.id} value={item.id}>{item.title} · {item.row_count} 行 · v{item.version}</option>)}</select>
+          <label className="mb-2 block text-xs font-medium text-slate-600">数据来源<select value={sourceType} onChange={(event) => { const nextType = event.target.value as "table_block" | "research_dataset"; setSourceType(nextType); const next = nextType === "research_dataset" ? state?.research_datasets[0] : state?.datasets[0]; setDatasetId(next?.id || ""); setDatasetVersion(nextType === "research_dataset" ? state?.research_datasets[0]?.latest_version : undefined); setPreview(null); }} className="mt-1 w-full rounded border border-slate-300 bg-white p-2 text-sm"><option value="table_block">论文表格</option><option value="research_dataset">研究数据集</option></select></label>
+          {sourceType === "table_block" ? <select value={datasetId} onChange={(event) => { setDatasetId(event.target.value); setDatasetVersion(undefined); }} className="mb-3 w-full rounded border border-slate-300 bg-white p-2 text-sm">{(state?.datasets || []).map((item) => <option key={item.id} value={item.id}>{item.title} · {item.row_count} 行 · v{item.version}</option>)}</select> : <><select value={datasetId} onChange={(event) => { setDatasetId(event.target.value); setDatasetVersion(undefined); }} className="mb-2 w-full rounded border border-slate-300 bg-white p-2 text-sm"><option value="">选择研究数据集</option>{(state?.research_datasets || []).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.row_count} 行 · v{item.latest_version}</option>)}</select><select value={datasetVersion || ""} onChange={(event) => setDatasetVersion(Number(event.target.value) || undefined)} disabled={!datasetId} className="mb-3 w-full rounded border border-slate-300 bg-white p-2 text-sm disabled:bg-slate-100"><option value="">选择版本</option>{researchVersions.map((item) => <option key={item.version} value={item.version}>版本 v{item.version} · {item.row_count} 行 · {new Date(item.created_at).toLocaleDateString()}</option>)}</select></>}
           <div className="space-y-2">{fields.map((field) => <div key={field.name} className="rounded border border-slate-100 bg-slate-50 p-2"><div className="flex items-center justify-between text-sm font-medium"><span>{field.name}</span><span className={`rounded px-1.5 py-0.5 text-[10px] ${field.kind === "number" ? "bg-blue-100 text-blue-700" : "bg-violet-100 text-violet-700"}`}>{field.kind === "number" ? "数值" : "类别"}</span></div><p className="mt-1 text-xs text-slate-500">缺失 {field.missing_count} · 唯一 {field.unique_count}</p>{field.statistics && <p className="mt-1 text-xs text-slate-500">均值 {field.statistics.avg.toFixed(2)} · 中位数 {field.statistics.median.toFixed(2)}</p>}</div>)}</div>
         </section>
         <section className="rounded-xl border bg-white p-4 shadow-sm"><h2 className="mb-3 font-semibold">数据预览</h2><div className="max-h-72 overflow-auto rounded border"><table className="min-w-full text-xs"><thead className="sticky top-0 bg-slate-100"><tr>{fields.map((field) => <th className="whitespace-nowrap border-b px-2 py-2 text-left" key={field.name}>{field.name}</th>)}</tr></thead><tbody>{(preview?.rows || []).map((row, index) => <tr key={index}>{fields.map((field) => <td key={field.name} className="max-w-40 truncate border-b px-2 py-1.5">{row[field.name]}</td>)}</tr>)}</tbody></table></div>{preview?.has_more && <p className="mt-2 text-xs text-slate-500">仅展示前 {preview.limit} 行；大数据集按页加载。</p>}</section>
