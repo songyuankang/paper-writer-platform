@@ -1487,7 +1487,8 @@ export async function attachDataset(datasetId: string, taskId: string): Promise<
   return ((await res.json()) as { dataset: DatasetSummary }).dataset;
 }
 
-export type AnalysisType = "descriptive" | "pearson" | "spearman";
+export type AnalysisType = "descriptive" | "pearson" | "spearman" | "independent_t" | "anova";
+export type AnalysisMethod = AnalysisType | "student_t" | "welch_t";
 export type AnalysisStatus = "ready" | "stale" | "running" | "failed";
 export interface Analysis {
   id: string;
@@ -1514,11 +1515,19 @@ export interface AnalysisResult {
   dataset_version: number;
   dataset_version_id: string;
   result: {
-    method: AnalysisType;
+    method: AnalysisMethod;
     numeric?: Array<{ variable: string; count: number; missing: number; mean: number | null; median: number | null; std: number | null; min: number | null; max: number | null; q1: number | null; q3: number | null }>;
     categorical?: Array<{ variable: string; count: number; missing: number; unique: number; frequency: Array<{ category: string; frequency: number; percentage: number }> }>;
     x?: string; y?: string; n?: number; r?: number; rho?: number; p_value?: number; significant?: boolean;
     pairs?: Array<{ x: number; y: number }>;
+    analysis_type?: "independent_t";
+    group_column?: string; value_column?: string;
+    group_a?: string; group_b?: string; n_a?: number; n_b?: number; mean_a?: number; mean_b?: number; std_a?: number; std_b?: number;
+    mean_difference?: number; t_statistic?: number; df?: number; effect_size?: number; effect_size_type?: "cohens_d"; effect_size_interpretation?: "negligible" | "small" | "medium" | "large";
+    groups?: string[]; group_statistics?: Array<{ group: string; count: number; mean: number; std: number; values?: number[] }>;
+    grand_mean?: number; ss_between?: number; ss_within?: number; df_between?: number; df_within?: number; ms_between?: number; ms_within?: number; f_statistic?: number; eta_squared?: number;
+    tukey_hsd?: Array<{ group1: string; group2: string; mean_difference: number; p_adjusted: number; lower: number; upper: number; reject: boolean }>;
+    assumptions?: Record<string, unknown>;
   };
   warnings: string[];
   data_fingerprint: string | null;

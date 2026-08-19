@@ -31,7 +31,7 @@ class AnalysisCreateRequest(BaseModel):
     task_id: str = Field(..., min_length=32, max_length=32)
     dataset_id: str = Field(..., min_length=4, max_length=160)
     dataset_version: int | None = Field(default=None, ge=1)
-    type: str = Field(..., pattern="^(descriptive|pearson|spearman)$")
+    type: str = Field(..., pattern="^(descriptive|pearson|spearman|independent_t|anova)$")
     name: str = Field(default="", max_length=120)
     description: str = Field(default="", max_length=500)
     variables: dict = Field(default_factory=dict)

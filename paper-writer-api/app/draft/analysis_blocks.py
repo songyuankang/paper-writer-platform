@@ -42,6 +42,32 @@ def _table_specs(analysis: dict[str, Any], result: dict[str, Any]) -> list[tuple
             str(payload.get("x") or ""), str(payload.get("y") or ""), _fmt(payload.get("n")),
             _fmt(payload.get(coefficient)), _fmt(payload.get("p_value")), "是" if payload.get("significant") else "否",
         ]])]
+    if payload.get("analysis_type") == "independent_t":
+        title = f"{analysis.get('name') or '独立样本 t 检验'}结果"
+        groups = [[str(item.get("group") or ""), _fmt(item.get("count")), _fmt(item.get("mean")), _fmt(item.get("std"))] for item in payload.get("group_statistics") or []]
+        test = [[_fmt(payload.get("mean_difference")), _fmt(payload.get("t_statistic")), _fmt(payload.get("df")), _fmt(payload.get("p_value")), _fmt(payload.get("effect_size")), str(payload.get("effect_size_interpretation") or "")]]
+        return [
+            (f"{title}：组统计", ["组别", "N", "Mean", "SD"], groups),
+            (f"{title}：检验结果", ["Mean Difference", "t", "df", "p", "Cohen's d", "效应量解释"], test),
+        ]
+    if payload.get("method") == "anova":
+        title = f"{analysis.get('name') or '单因素方差分析'}结果"
+        groups = [[str(item.get("group") or ""), _fmt(item.get("count")), _fmt(item.get("mean")), _fmt(item.get("std"))] for item in payload.get("group_statistics") or []]
+        anova_rows = [
+            ["组间", _fmt(payload.get("ss_between")), _fmt(payload.get("df_between")), _fmt(payload.get("ms_between")), _fmt(payload.get("f_statistic")), _fmt(payload.get("p_value")), _fmt(payload.get("eta_squared"))],
+            ["组内", _fmt(payload.get("ss_within")), _fmt(payload.get("df_within")), _fmt(payload.get("ms_within")), "—", "—", "—"],
+        ]
+        specs = [
+            (f"{title}：组统计", ["组别", "N", "Mean", "SD"], groups),
+            (f"{title}：ANOVA", ["来源", "SS", "df", "MS", "F", "p", "eta squared"], anova_rows),
+        ]
+        tukey = payload.get("tukey_hsd") or []
+        if tukey:
+            specs.append((f"{title}：Tukey HSD", ["Group 1", "Group 2", "Mean Difference", "Adjusted p", "CI", "Reject"], [[
+                str(item.get("group1") or ""), str(item.get("group2") or ""), _fmt(item.get("mean_difference")), _fmt(item.get("p_adjusted")),
+                f"[{_fmt(item.get('lower'))}, {_fmt(item.get('upper'))}]", "是" if item.get("reject") else "否",
+            ] for item in tukey]))
+        return specs
     specs: list[tuple[str, list[str], list[list[str]]]] = []
     numeric = payload.get("numeric") or []
     if numeric:
@@ -135,11 +161,42 @@ def _insert_correlation_chart(task_id: str, analysis: dict[str, Any], result: di
     return block
 
 
+def _insert_group_boxplot(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str) -> dict[str, Any]:
+    payload = result.get("result") or {}
+    if payload.get("analysis_type") != "independent_t" and payload.get("method") != "anova":
+        raise ValueError("当前分析结果不支持组间箱线图")
+    groups = payload.get("group_statistics") or []
+    if len(groups) < 2:
+        raise ValueError("有效分组不足，无法生成箱线图")
+    service = DraftService(task_id, settings.output_dir / task_id)
+    chart_id = f"chart_analysis_{uuid.uuid4().hex[:12]}"
+    method = "独立样本 t 检验" if payload.get("analysis_type") == "independent_t" else "单因素 ANOVA"
+    spec = {
+        "id": chart_id, "schema_version": 2, "kind": "boxplot",
+        "title": f"{payload.get('value_column') or '数值'}按{payload.get('group_column') or '组别'}的组间分布",
+        "caption": f"基于 {method} 的各组有效观测绘制箱线图。",
+        "binding": {"source_type": "research_dataset", "dataset_id": result["dataset_id"], "dataset_version": result["dataset_version"], "data_fingerprint": result.get("data_fingerprint"), "analysis_id": analysis["id"], "analysis_result_id": result["id"]},
+        "data": {"categories": [str(item.get("group") or "") for item in groups], "series": [{"name": str(item.get("group") or "组别"), "values": [float(value) for value in item.get("values") or []], "axis": "left"} for item in groups], "row_count": sum(int(item.get("count") or 0) for item in groups)},
+        "appearance": normalize_appearance({"template": "academic", "legend": False, "y_label": str(payload.get("value_column") or "")}, "boxplot"),
+        "provenance": {"status": "user_provided", "source_note": "数据来源：AnalysisResult 的分组有效观测。"},
+    }
+    asset = render_chart_assets(service.task_dir, chart_id, 1, spec)
+    block = {"id": chart_id, "type": "chart", "status": "ready", "version": 1, "text": "", "title": spec["title"], "caption": spec["caption"], "chart_spec": spec, "chart": {"schema_version": 2, "kind": "boxplot", "title": spec["title"], "caption": spec["caption"], **spec["data"]}, "asset": asset, "display_scale": .75, "provenance": "user_provided", "source_ids": [], "analysis": _reference(analysis, result), "in_paper": True, "generated_at": now()}
+    with service.lock:
+        draft = service.load()
+        section = service._find_section(draft, section_id)
+        section.setdefault("paragraphs", []).append(block)
+        service.save(draft)
+    return block
+
+
 def insert_analysis_result(*, task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, artifact: str) -> dict[str, Any]:
     if result.get("status") != "ready":
         raise ValueError("仅可插入已成功运行的 AnalysisResult")
     if artifact == "table":
         return {"type": "table", "blocks": _insert_table(task_id, analysis, result, section_id)}
     if artifact == "chart":
-        return {"type": "chart", "block": _insert_correlation_chart(task_id, analysis, result, section_id)}
+        payload = result.get("result") or {}
+        block = _insert_correlation_chart(task_id, analysis, result, section_id) if payload.get("method") in {"pearson", "spearman"} else _insert_group_boxplot(task_id, analysis, result, section_id)
+        return {"type": "chart", "block": block}
     raise ValueError("不支持的分析结果插入类型")
