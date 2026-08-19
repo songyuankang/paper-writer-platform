@@ -31,7 +31,7 @@ class AnalysisCreateRequest(BaseModel):
     task_id: str = Field(..., min_length=32, max_length=32)
     dataset_id: str = Field(..., min_length=4, max_length=160)
     dataset_version: int | None = Field(default=None, ge=1)
-    type: str = Field(..., pattern="^(descriptive|pearson|spearman|independent_t|anova)$")
+    type: str = Field(..., pattern="^(descriptive|pearson|spearman|independent_t|anova|regression)$")
     name: str = Field(default="", max_length=120)
     description: str = Field(default="", max_length=500)
     variables: dict = Field(default_factory=dict)
@@ -41,7 +41,7 @@ class AnalysisCreateRequest(BaseModel):
 class AnalysisInsertRequest(BaseModel):
     section_id: str = Field(..., min_length=1, max_length=160)
     result_id: str | None = Field(default=None, max_length=160)
-    artifact: str = Field(default="table", pattern="^(table|chart)$")
+    artifact: str = Field(default="table", pattern="^(table|chart|actual_predicted|residual|coefficient)$")
 
 
 @router.post("")

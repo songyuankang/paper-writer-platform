@@ -17,11 +17,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy import stats
+import statsmodels.api as sm
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 from app.config import Settings
 from app.services.dataset_service import DatasetService
 
-SUPPORTED_ANALYSIS_TYPES = {"descriptive", "pearson", "spearman", "independent_t", "anova"}
+SUPPORTED_ANALYSIS_TYPES = {"descriptive", "pearson", "spearman", "independent_t", "anova", "regression"}
 
 
 def _now() -> str:
@@ -115,12 +117,12 @@ class AnalysisService:
     ) -> dict[str, Any]:
         analysis_type = str(analysis_type or "").lower()
         if analysis_type not in SUPPORTED_ANALYSIS_TYPES:
-            raise ValueError("当前仅支持 descriptive、pearson、spearman、independent_t 与 anova 分析")
+            raise ValueError("当前仅支持 descriptive、pearson、spearman、independent_t、anova 与 regression 分析")
         version_info = self.datasets.get_version(dataset_id, dataset_version, include_rows=False)
         version = int(version_info["version"])
         analysis_id = f"an_{uuid.uuid4().hex[:16]}"
         created_at = _now()
-        defaults = {"descriptive": "描述性统计", "pearson": "Pearson 相关分析", "spearman": "Spearman 相关分析", "independent_t": "独立样本 t 检验", "anova": "单因素方差分析"}
+        defaults = {"descriptive": "描述性统计", "pearson": "Pearson 相关分析", "spearman": "Spearman 相关分析", "independent_t": "独立样本 t 检验", "anova": "单因素方差分析", "regression": "普通线性回归"}
         analysis = {
             "id": analysis_id,
             "task_id": task_id,
@@ -429,6 +431,65 @@ class AnalysisService:
             "tukey_hsd": tukey_rows, "assumptions": {"levene_statistic": float(levene.statistic) if levene is not None else None, "levene_p_value": float(levene.pvalue) if levene is not None else None},
         }, warnings
 
+    @staticmethod
+    def _regression(analysis: dict[str, Any], version: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        frame = AnalysisService._frame(version)
+        variables = analysis.get("variables") or {}
+        dependent = str(variables.get("dependent_variable") or "")
+        predictors = [str(item) for item in variables.get("predictors") or []]
+        if not dependent or not predictors:
+            raise ValueError("线性回归必须选择一个因变量和至少一个自变量")
+        if dependent in predictors:
+            raise ValueError("因变量不能同时作为自变量")
+        if len(set(predictors)) != len(predictors):
+            raise ValueError("自变量不能重复")
+        columns = [dependent, *predictors]
+        if any(item not in frame.columns for item in columns):
+            raise ValueError("选择的变量不存在于 DatasetVersion")
+        schema = {str(item.get("name")): str(item.get("type") or "text") for item in version.get("schema") or []}
+        if any(schema.get(item) != "numeric" for item in columns):
+            raise ValueError("第一版 OLS 仅支持数值型因变量和自变量")
+        numeric = frame[columns].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
+        raw_n = int(len(numeric))
+        valid = numeric.dropna()
+        excluded = raw_n - int(len(valid))
+        warnings: list[str] = []
+        if excluded:
+            warnings.append(f"已排除 {excluded} 行缺失、NaN、Inf 或非数值观测。")
+        minimum_n = len(predictors) + 3
+        if len(valid) < minimum_n:
+            raise ValueError(f"有效样本不足：OLS 至少需要 {minimum_n} 个有效观测")
+        y = valid[dependent].astype(float)
+        x_raw = valid[predictors].astype(float)
+        if float(y.std(ddof=0)) == 0:
+            raise ValueError("因变量为常数，无法执行线性回归")
+        constant_columns = [name for name in predictors if float(x_raw[name].std(ddof=0)) == 0]
+        if constant_columns:
+            raise ValueError(f"存在常数自变量：{', '.join(constant_columns)}")
+        design = sm.add_constant(x_raw, has_constant="add")
+        if np.linalg.matrix_rank(design.to_numpy()) < design.shape[1]:
+            raise ValueError("自变量完全共线或设计矩阵奇异，无法执行 OLS")
+        model = sm.OLS(y, design).fit()
+        alpha = float((analysis.get("parameters") or {}).get("alpha") or .05)
+        if not .001 <= alpha <= .2:
+            alpha = .05
+        ci = model.conf_int(alpha=alpha)
+        vif_rows: list[dict[str, Any]] = []
+        for index, name in enumerate(predictors):
+            vif = float(variance_inflation_factor(x_raw.to_numpy(), index)) if len(predictors) > 1 else 1.0
+            status = "ok" if vif < 5 else "warning" if vif < 10 else "high_multicollinearity"
+            if status != "ok":
+                warnings.append(f"{name} 的 VIF={vif:.3g}，存在{'高' if status == 'high_multicollinearity' else '中等'}多重共线性提示。")
+            vif_rows.append({"variable": name, "vif": vif, "status": status})
+        coefficients: list[dict[str, Any]] = []
+        y_std = float(y.std(ddof=0))
+        for name in predictors:
+            beta = float(model.params[name] * x_raw[name].std(ddof=0) / y_std)
+            coefficients.append({"variable": name, "coefficient": float(model.params[name]), "standard_error": float(model.bse[name]), "standardized_coefficient": beta, "t_statistic": float(model.tvalues[name]), "p_value": float(model.pvalues[name]), "ci_lower": float(ci.loc[name, 0]), "ci_upper": float(ci.loc[name, 1]), "vif": next(item["vif"] for item in vif_rows if item["variable"] == name)})
+        predicted = model.predict(design)
+        residuals = y - predicted
+        return {"method": "ols", "analysis_type": "regression", "dependent_variable": dependent, "predictors": predictors, "alpha": alpha, "raw_sample_size": raw_n, "n": int(len(valid)), "excluded_rows": excluded, "exclusion_reason": "缺失、NaN、Inf 或非数值观测" if excluded else None, "r": float(math.sqrt(max(float(model.rsquared), 0))), "r_squared": float(model.rsquared), "adjusted_r_squared": float(model.rsquared_adj), "f_statistic": float(model.fvalue), "f_p_value": float(model.f_pvalue), "df_model": float(model.df_model), "df_resid": float(model.df_resid), "intercept": {"coefficient": float(model.params["const"]), "standard_error": float(model.bse["const"]), "t_statistic": float(model.tvalues["const"]), "p_value": float(model.pvalues["const"]), "ci_lower": float(ci.loc["const", 0]), "ci_upper": float(ci.loc["const", 1])}, "coefficients": coefficients, "vif": vif_rows, "points": [{"actual": float(actual), "predicted": float(pred), "residual": float(residual)} for actual, pred, residual in zip(y.tolist(), predicted.tolist(), residuals.tolist())], "diagnostics": {"constant_predictors": [], "matrix_rank": int(np.linalg.matrix_rank(design.to_numpy())), "design_columns": int(design.shape[1])}}, warnings
+
     def run(self, analysis_id: str) -> dict[str, Any]:
         analysis = self._load(analysis_id)
         analysis.update(status="running", stale_reason=None, error_message=None, updated_at=_now())
@@ -451,6 +512,8 @@ class AnalysisService:
                 payload, warnings = self._independent_t(analysis, version)
             elif analysis["type"] == "anova":
                 payload, warnings = self._anova(analysis, version)
+            elif analysis["type"] == "regression":
+                payload, warnings = self._regression(analysis, version)
             else:
                 raise ValueError("不支持的分析类型")
             result = {

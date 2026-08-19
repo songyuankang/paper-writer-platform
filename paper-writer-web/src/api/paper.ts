@@ -1487,8 +1487,8 @@ export async function attachDataset(datasetId: string, taskId: string): Promise<
   return ((await res.json()) as { dataset: DatasetSummary }).dataset;
 }
 
-export type AnalysisType = "descriptive" | "pearson" | "spearman" | "independent_t" | "anova";
-export type AnalysisMethod = AnalysisType | "student_t" | "welch_t";
+export type AnalysisType = "descriptive" | "pearson" | "spearman" | "independent_t" | "anova" | "regression";
+export type AnalysisMethod = AnalysisType | "student_t" | "welch_t" | "ols";
 export type AnalysisStatus = "ready" | "stale" | "running" | "failed";
 export interface Analysis {
   id: string;
@@ -1520,7 +1520,6 @@ export interface AnalysisResult {
     categorical?: Array<{ variable: string; count: number; missing: number; unique: number; frequency: Array<{ category: string; frequency: number; percentage: number }> }>;
     x?: string; y?: string; n?: number; r?: number; rho?: number; p_value?: number; significant?: boolean;
     pairs?: Array<{ x: number; y: number }>;
-    analysis_type?: "independent_t";
     group_column?: string; value_column?: string;
     group_a?: string; group_b?: string; n_a?: number; n_b?: number; mean_a?: number; mean_b?: number; std_a?: number; std_b?: number;
     mean_difference?: number; t_statistic?: number; df?: number; effect_size?: number; effect_size_type?: "cohens_d"; effect_size_interpretation?: "negligible" | "small" | "medium" | "large";
@@ -1528,6 +1527,13 @@ export interface AnalysisResult {
     grand_mean?: number; ss_between?: number; ss_within?: number; df_between?: number; df_within?: number; ms_between?: number; ms_within?: number; f_statistic?: number; eta_squared?: number;
     tukey_hsd?: Array<{ group1: string; group2: string; mean_difference: number; p_adjusted: number; lower: number; upper: number; reject: boolean }>;
     assumptions?: Record<string, unknown>;
+    analysis_type?: "independent_t" | "regression";
+    dependent_variable?: string; predictors?: string[]; raw_sample_size?: number; excluded_rows?: number; exclusion_reason?: string | null;
+    r_squared?: number; adjusted_r_squared?: number; f_p_value?: number; df_model?: number; df_resid?: number;
+    intercept?: { coefficient: number; standard_error: number; t_statistic: number; p_value: number; ci_lower: number; ci_upper: number };
+    coefficients?: Array<{ variable: string; coefficient: number; standard_error: number; standardized_coefficient: number; t_statistic: number; p_value: number; ci_lower: number; ci_upper: number; vif: number }>;
+    vif?: Array<{ variable: string; vif: number; status: "ok" | "warning" | "high_multicollinearity" }>;
+    points?: Array<{ actual: number; predicted: number; residual: number }>;
   };
   warnings: string[];
   data_fingerprint: string | null;
@@ -1572,7 +1578,7 @@ export async function getAnalysisResult(analysisId: string, resultId?: string): 
   if (!res.ok) throw await toError(res);
   return ((await res.json()) as { result: AnalysisResult }).result;
 }
-export async function insertAnalysisResult(analysisId: string, input: { section_id: string; result_id?: string; artifact: "table" | "chart" }): Promise<{ block: unknown; analysis: Analysis; result: AnalysisResult }> {
+export async function insertAnalysisResult(analysisId: string, input: { section_id: string; result_id?: string; artifact: "table" | "chart" | "actual_predicted" | "residual" | "coefficient" }): Promise<{ block: unknown; analysis: Analysis; result: AnalysisResult }> {
   const res = await apiFetch(`${API_BASE}/api/analyses/${encodeURIComponent(analysisId)}/insert`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
   if (!res.ok) throw await toError(res);
   return res.json();
