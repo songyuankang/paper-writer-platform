@@ -1255,3 +1255,121 @@ export async function regenerateDraftInsight(taskId: string, blockId: string, pa
   if (!response.ok) throw await toError(response);
   return response.json();
 }
+
+
+// ===== Visualization Lab =====
+export type LabChartKind = "bar" | "line" | "pie" | "scatter" | "area" | "boxplot" | "histogram" | "heatmap" | "combo";
+export type LabAggregation = "none" | "count" | "sum" | "avg" | "median" | "min" | "max";
+export type LabFilterOperator = "=" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "between";
+export interface LabField {
+  name: string;
+  kind: "number" | "string";
+  position: number;
+  missing_count: number;
+  unique_count: number;
+  statistics?: { min: number; max: number; avg: number; median: number };
+}
+export interface LabDataset {
+  id: string;
+  title: string;
+  version: number;
+  row_count: number;
+  source_table_id: string;
+  fingerprint: string;
+  schema: Array<{ name: string; kind: "number" | "string"; position: number }>;
+}
+export interface LabBinding {
+  dataset_id?: string;
+  dataset_version?: number;
+  source_table_id?: string;
+  category_column?: string;
+  measure_columns?: string[];
+  series_column?: string | null;
+  aggregation?: LabAggregation;
+  filters?: Array<{ column: string; operator: LabFilterOperator; value: unknown }>;
+  data_fingerprint?: string;
+}
+export interface LabAppearance {
+  template?: "academic" | "cn_thesis" | "clean_report";
+  legend?: boolean;
+  value_labels?: boolean;
+  grid?: boolean;
+  x_label?: string;
+  y_label?: string;
+}
+export interface LabChart {
+  id: string;
+  title: string;
+  caption: string;
+  status: "ready" | "stale" | "failed" | "generating";
+  version: number;
+  in_paper: boolean;
+  figure_number?: string;
+  kind: LabChartKind;
+  chart_spec: {
+    schema_version: 2;
+    kind: LabChartKind;
+    title: string;
+    caption: string;
+    binding: LabBinding;
+    appearance: LabAppearance;
+    data: { categories: string[]; series: DraftChartSeries[]; pie?: Array<{ name: string; value: number }>; row_count?: number };
+  };
+  asset?: DraftChartAsset;
+  stale_reason?: string | null;
+}
+export interface LabState {
+  datasets: LabDataset[];
+  charts: Array<Omit<LabChart, "chart_spec"> & { dataset_id?: string; source_table_id?: string }>;
+  sections: Array<{ id: string; number: string; title: string }>;
+  templates: Array<{ id: string; label: string }>;
+}
+export interface LabDatasetPreview {
+  dataset: Pick<LabDataset, "id" | "title" | "version" | "row_count" | "source_table_id" | "fingerprint">;
+  fields: LabField[];
+  rows: Array<Record<string, string>>;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
+export async function getLabState(taskId: string): Promise<LabState> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/state`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function getLabDataset(taskId: string, datasetId: string, limit = 50, offset = 0): Promise<LabDatasetPreview> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/datasets/${encodeURIComponent(datasetId)}?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function getLabChart(taskId: string, chartId: string): Promise<LabChart> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/charts/${encodeURIComponent(chartId)}`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function createLabChart(taskId: string, input: { table_id: string; title_hint?: string; chart_kind?: LabChartKind }): Promise<LabChart> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/charts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function updateLabChart(taskId: string, chartId: string, input: { title?: string; caption?: string; kind?: LabChartKind; binding?: LabBinding; appearance?: LabAppearance }): Promise<LabChart> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/charts/${encodeURIComponent(chartId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function recomputeLabChart(taskId: string, chartId: string, chart_kind?: LabChartKind): Promise<LabChart> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/charts/${encodeURIComponent(chartId)}/recompute`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chart_kind }) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function insertLabChart(taskId: string, chartId: string, section_id: string): Promise<LabChart> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/lab/charts/${encodeURIComponent(chartId)}/insert`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ section_id }) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function adaptInsightChart(taskId: string, insightId: string): Promise<DraftParagraph> {
+  const res = await apiFetch(`${API_BASE}/api/draft/${taskId}/insight/${encodeURIComponent(insightId)}/adapt-chart`, { method: "POST" });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}

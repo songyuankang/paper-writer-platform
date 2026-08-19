@@ -20,9 +20,9 @@ from app.draft.chart_runtime import (
     render_chart_assets,
 )
 
-# ``mixed`` remains accepted for existing requests, but new business behaviour is
-# limited to bar/line/pie in this first refactor stage.
-ChartKind = Literal["bar", "line", "pie", "mixed"]
+# ``mixed`` remains a legacy alias; all current kinds are rendered by the
+# single ChartRenderer in chart_runtime.
+ChartKind = Literal["bar", "line", "pie", "scatter", "area", "boxplot", "histogram", "heatmap", "combo", "mixed"]
 
 
 class ChartCreateRequest(BaseModel):
@@ -44,7 +44,9 @@ class ChartRegenerateRequest(BaseModel):
 
 
 def _kind(value: str | None) -> str:
-    return value if value in {"bar", "line", "pie"} else "bar"
+    if value == "mixed":
+        return "combo"
+    return value if value in {"bar", "line", "pie", "scatter", "area", "boxplot", "histogram", "heatmap", "combo"} else "bar"
 
 
 def _section(draft: dict, section_id: str) -> dict:

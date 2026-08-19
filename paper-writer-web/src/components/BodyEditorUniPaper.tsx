@@ -432,6 +432,7 @@ export default function BodyEditorUniPaper({
           </select>
         )}
         <nav className="hidden items-center gap-3 text-sm text-neutral-600 sm:flex" aria-label="编辑器工具">
+          <a href={`/lab/${taskId}`} className="font-medium text-blue-700 hover:text-blue-900">Visualization Lab</a>
           <button type="button" onClick={() => setTemplateManagerOpen(true)} className="hover:text-black">模板管理</button>
           <button type="button" onClick={() => setHistoryOpen(true)} className="hover:text-black">历史记录</button>
           <button type="button" onClick={() => setModelSettingsOpen(true)} className="hover:text-black">模型设置</button>

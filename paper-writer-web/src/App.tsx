@@ -18,6 +18,7 @@ import AbstractPage from "./pages/create/AbstractPage";
 import ReferencesPage from "./pages/create/ReferencesPage";
 import OutlineReviewPage from "./pages/create/OutlineReviewPage";
 import BodyPage from "./pages/create/BodyPage";
+import VisualizationLab from "./pages/VisualizationLab";
 
 function CreateIndexRedirect() {
   const location = useLocation();
@@ -48,6 +49,7 @@ export default function App() {
         <Route path="/settings/models" element={<SettingsModels />} />
         <Route path="/format/:taskId" element={<FormatPage />} />
         <Route path="/preview/:taskId" element={<PreviewPage />} />
+        <Route path="/lab/:taskId" element={<VisualizationLab />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

@@ -13,7 +13,19 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.draft.service import DraftService
 from app.draft import block_service
-from app.draft.chart_runtime import locate_block
+from app.draft.chart_runtime import (
+    adapt_insight_chart,
+    create_lab_chart,
+    dataset_by_id,
+    dataset_profile,
+    insert_chart_into_section,
+    locate_block,
+    locate_chart,
+    recompute_chart_block,
+    update_chart_configuration,
+    upsert_table_dataset,
+    walk_sections,
+)
 from app.draft.insight_blocks import (
     InsightCreateRequest,
     InsightPatchRequest,
@@ -88,6 +100,31 @@ class OutlineAddRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
     gist: str = Field("", max_length=500)
     parent_id: str | None = Field(None)
+
+
+class LabChartCreateRequest(BaseModel):
+    table_id: str = Field(..., min_length=1, max_length=160)
+    title_hint: str = Field("", max_length=100)
+    chart_kind: str = Field("bar", max_length=32)
+
+
+class LabChartPatchRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=100)
+    caption: str | None = Field(default=None, max_length=220)
+    kind: str | None = Field(default=None, max_length=32)
+    binding: dict | None = None
+    appearance: dict | None = None
+
+
+class LabChartRecomputeRequest(BaseModel):
+    chart_kind: str | None = Field(default=None, max_length=32)
+
+
+class LabChartInsertRequest(BaseModel):
+    section_id: str = Field(..., min_length=1, max_length=160)
+
+
+
 
 
 @router.get("/{task_id}")
@@ -281,6 +318,129 @@ def export(task_id: str, request: Request,
     return {"ok": True, "files": files}
 
 
+def _lab_chart_summary(block: dict) -> dict:
+    spec = block.get("chart_spec") or {}
+    binding = spec.get("binding") or {}
+    return {
+        "id": block.get("id"), "title": block.get("title"), "caption": block.get("caption"),
+        "status": block.get("status"), "version": block.get("version"),
+        "in_paper": bool(block.get("in_paper", True)), "figure_number": block.get("figure_number"),
+        "kind": spec.get("kind") or (block.get("chart") or {}).get("kind"),
+        "dataset_id": binding.get("dataset_id"), "source_table_id": binding.get("source_table_id"),
+        "asset": block.get("asset"), "stale_reason": block.get("stale_reason"),
+    }
+
+
+@router.get("/{task_id}/lab/state")
+def get_lab_state(task_id: str, request: Request) -> dict:
+    service = _service(task_id, request)
+    with service.lock:
+        draft = service.load()
+        # Existing first-stage drafts may predate `datasets`; hydrate only from
+        # their authoritative table blocks rather than inventing a second source.
+        for section in walk_sections(draft.get("sections") or []):
+            for block in section.get("paragraphs") or []:
+                if block.get("type") == "table":
+                    upsert_table_dataset(draft, block)
+        service.save(draft)
+    charts = []
+    for section in walk_sections(draft.get("sections") or []):
+        for block in section.get("paragraphs") or []:
+            if block.get("type") == "chart":
+                charts.append(_lab_chart_summary(block))
+    for block in draft.get("chart_library") or []:
+        if block.get("type") == "chart":
+            charts.append(_lab_chart_summary(block))
+    sections = [{"id": item.get("id"), "number": item.get("number", ""), "title": item.get("title", "")} for item in walk_sections(draft.get("sections") or [])]
+    return {"datasets": draft.get("datasets") or [], "charts": charts, "sections": sections, "templates": [{"id": key, **value} for key, value in {"academic": {"label": "学术论文"}, "cn_thesis": {"label": "中文毕业论文"}, "clean_report": {"label": "简洁报告"}}.items()]}
+
+
+@router.get("/{task_id}/lab/datasets/{dataset_id}")
+def get_lab_dataset(task_id: str, dataset_id: str, request: Request, limit: int = 50, offset: int = 0) -> dict:
+    draft = _service(task_id, request).load()
+    try:
+        return dataset_profile(dataset_by_id(draft, dataset_id), limit=limit, offset=offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{task_id}/lab/charts/{chart_id}")
+def get_lab_chart(task_id: str, chart_id: str, request: Request) -> dict:
+    draft = _service(task_id, request).load()
+    try:
+        _, block, _ = locate_chart(draft, chart_id)
+        return block
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/lab/charts")
+def create_lab_chart_endpoint(task_id: str, body: LabChartCreateRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    try:
+        with service.lock:
+            draft = service.load()
+            chart_id = "chart_" + __import__("uuid").uuid4().hex[:12]
+            block = create_lab_chart(draft, service.task_dir, chart_id, body.table_id, body.title_hint, body.chart_kind)
+            service.save(draft)
+            return block
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/{task_id}/lab/charts/{chart_id}")
+def patch_lab_chart(task_id: str, chart_id: str, body: LabChartPatchRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    try:
+        with service.lock:
+            draft = service.load()
+            block = update_chart_configuration(draft, service.task_dir, chart_id, body.model_dump(exclude_none=True))
+            service.save(draft)
+            return block
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/lab/charts/{chart_id}/recompute")
+def recompute_lab_chart(task_id: str, chart_id: str, body: LabChartRecomputeRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    try:
+        with service.lock:
+            draft = service.load()
+            _, block, _ = locate_chart(draft, chart_id)
+            recompute_chart_block(draft, service.task_dir, block, body.chart_kind)
+            service.save(draft)
+            return block
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/lab/charts/{chart_id}/insert")
+def insert_lab_chart(task_id: str, chart_id: str, body: LabChartInsertRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    try:
+        with service.lock:
+            draft = service.load()
+            block = insert_chart_into_section(draft, chart_id, body.section_id)
+            service.save(draft)
+            return block
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/insight/{insight_id}/adapt-chart")
+def adapt_insight_chart_endpoint(task_id: str, insight_id: str, request: Request) -> dict:
+    service = _service(task_id, request)
+    try:
+        with service.lock:
+            draft = service.load()
+            block = adapt_insight_chart(draft, service.task_dir, insight_id)
+            service.save(draft)
+            return block
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/{task_id}/section/{section_id}/chart")
 def add_chart(task_id: str, section_id: str, body: ChartCreateRequest, request: Request):
     try:
@@ -313,7 +473,7 @@ def get_chart_asset(task_id: str, block_id: str, request: Request, format: str =
     service = _service(task_id, request)
     draft = service.load()
     try:
-        _, block = locate_block(draft, block_id)
+        _, block, _ = locate_chart(draft, block_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if block.get("type") != "chart":
