@@ -372,7 +372,6 @@ def search_references(query: str, limit: int = 12,
             if source in sources
         }
         for future in as_completed(future_map):
-            source = future_map[future]
             try:
                 results.append(future.result())
                 successful = True

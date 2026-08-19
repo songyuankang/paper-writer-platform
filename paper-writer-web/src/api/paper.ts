@@ -5,14 +5,12 @@ export interface GenerateParams {
   major: string;
   paper_type: string;
   word_count: number;
-  chart_enabled: boolean;
   reference_style: string;
   special_requirements?: string;
   school_template?: File | null;
   generation_mode?: "auto" | "outline";
   outline?: string;
   model_id?: string;
-  chart_config?: { enabled: boolean; count: number; types: string[] } | null;
   /** 参考资料文件（开题报告/仿写论文/其他资料），最多 5 个、每个 ≤5MB */
   files?: File[];
   /** 与 files 一一对应的资料类型 */
@@ -122,6 +120,26 @@ export const API_BASE = (
   (import.meta.env.VITE_API_URL as string | undefined) ?? ""
 ).replace(/\/+$/, "");
 
+/** 可选的部署认证令牌；留空时保持本机开发流程完全不变。 */
+export const API_AUTH_TOKEN =
+  (import.meta.env.VITE_PAPER_WRITER_AUTH_TOKEN as string | undefined) ?? "";
+
+/** 为无法自定义请求头的 SSE 与浏览器下载请求附加认证参数。 */
+export function withAuthQuery(url: string): string {
+  if (!API_AUTH_TOKEN) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}auth_token=${encodeURIComponent(API_AUTH_TOKEN)}`;
+}
+
+async function apiFetch(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (API_AUTH_TOKEN) headers.set("Authorization", `Bearer ${API_AUTH_TOKEN}`);
+  return fetch(input, { ...init, headers });
+}
+
 async function toError(res: Response): Promise<Error> {
   let message = `请求失败（HTTP ${res.status}）`;
   try {
@@ -148,16 +166,12 @@ export async function generatePaper(
   form.append("major", params.major);
   form.append("paper_type", params.paper_type);
   form.append("word_count", String(params.word_count));
-  form.append("chart_enabled", String(params.chart_enabled));
   form.append("reference_style", params.reference_style);
   if (params.generation_mode) {
     form.append("generation_mode", params.generation_mode);
   }
   if (params.outline) {
     form.append("outline", params.outline);
-  }
-  if (params.chart_config) {
-    form.append("chart_config", JSON.stringify(params.chart_config));
   }
   if (params.special_requirements != null) {
     form.append("special_requirements", params.special_requirements);
@@ -188,7 +202,7 @@ export async function generatePaper(
     form.append("draft_mode", "true");
   }
 
-  const res = await fetch(`${API_BASE}/api/generate`, {
+  const res = await apiFetch(`${API_BASE}/api/generate`, {
     method: "POST",
     body: form,
   });
@@ -356,7 +370,7 @@ export async function listTemplates(): Promise<{
   items: TemplateSummary[];
   default_id: string | null;
 }> {
-  const res = await fetch(`${API_BASE}/api/templates`);
+  const res = await apiFetch(`${API_BASE}/api/templates`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -367,7 +381,7 @@ export async function listTemplates(): Promise<{
 export async function getTemplateDetail(
   templateId: string,
 ): Promise<TemplateDetail> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/templates/${encodeURIComponent(templateId)}`,
   );
   if (!res.ok) {
@@ -388,7 +402,7 @@ export async function updateTemplate(
   templateId: string,
   payload: TemplateWritePayload,
 ): Promise<TemplateDetail> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/templates/${encodeURIComponent(templateId)}`,
     {
       method: "PUT",
@@ -415,7 +429,7 @@ export function duplicateTemplate(
 
 /** 删除我的模板。 */
 export async function deleteTemplateRecord(templateId: string): Promise<void> {
-  const res = await fetch(
+  const res = await apiFetch(
     `${API_BASE}/api/templates/${encodeURIComponent(templateId)}`,
     { method: "DELETE" },
   );
@@ -446,7 +460,7 @@ export async function generateOutline(params: {
   if (!params.model_id) {
     delete body.model_id;
   }
-  const res = await fetch(`${API_BASE}/api/outline/generate`, {
+  const res = await apiFetch(`${API_BASE}/api/outline/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -464,7 +478,7 @@ export async function generateTopicSuggestions(params: {
   model_id?: string;
   prompt?: string;
 }): Promise<{ topics: string[] }> {
-  const res = await fetch(`${API_BASE}/api/topics/suggest`, {
+  const res = await apiFetch(`${API_BASE}/api/topics/suggest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -481,7 +495,7 @@ export async function generateAbstract(params: {
   special_requirements?: string;
   model_id?: string;
 }): Promise<{ abstract: string; keywords: string[] }> {
-  const res = await fetch(`${API_BASE}/api/abstract/generate`, {
+  const res = await apiFetch(`${API_BASE}/api/abstract/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -493,6 +507,28 @@ export async function generateAbstract(params: {
 }
 
 /** 真实参考文献条目（CrossRef 学术库）。 */
+export type ManualReferenceType =
+  | "journal"
+  | "thesis"
+  | "conference"
+  | "book"
+  | "report"
+  | "web"
+  | "standard";
+
+export interface ManualReferenceInput {
+  reference_type: ManualReferenceType;
+  authors: string;
+  title: string;
+  source: string;
+  year: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  doi?: string;
+  url?: string;
+}
+
 export interface ReferenceItem {
   title: string;
   authors: string;
@@ -502,7 +538,24 @@ export interface ReferenceItem {
   doi: string;
   abstract: string;
   citation: string;
-  source_name?: "crossref" | "openalex" | "semantic_scholar" | "arxiv";
+  url?: string;
+  manual?: ManualReferenceInput;
+  source_name?: "crossref" | "openalex" | "semantic_scholar" | "arxiv" | "manual";
+}
+
+/** 将手动录入字段格式化为可勾选的本地参考文献条目。 */
+export async function formatManualReference(
+  payload: ManualReferenceInput,
+): Promise<{ reference: ReferenceItem }> {
+  const res = await apiFetch(`${API_BASE}/api/references/manual`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    throw await toError(res);
+  }
+  return res.json();
 }
 
 /** 搜索真实参考文献（创作向导第③步）。 */
@@ -513,7 +566,7 @@ export async function searchReferences(params: {
   query?: string;
   limit?: number;
 }): Promise<{ references: ReferenceItem[]; query: string }> {
-  const res = await fetch(`${API_BASE}/api/references/search`, {
+  const res = await apiFetch(`${API_BASE}/api/references/search`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -526,11 +579,34 @@ export async function searchReferences(params: {
 
 // ===== 论文草稿（逐段生成编辑器）=====
 
+export interface DraftChartSeries {
+  name: string;
+  values: number[];
+  axis: "left" | "right";
+}
+export interface DraftChartSpec {
+  schema_version: 1;
+  kind: "bar" | "line" | "mixed" | "pie";
+  title: string;
+  caption: string;
+  categories?: string[];
+  series?: DraftChartSeries[];
+  pie?: Array<{ name: string; value: number }>;
+}
 export interface DraftParagraph {
   id: string;
   text: string;
+  type?: "paragraph" | "table" | "chart" | "insight";
+  insight?: DraftInsightBlock;
+  title?: string;
+  headers?: string[];
+  rows?: string[][];
+  caption?: string;
+  chart?: DraftChartSpec;
+  display_scale?: number;
+  provenance?: "user_provided" | "model_generated" | "illustrative";
+  status?: "ready" | "generating" | "failed";
 }
-
 export interface DraftSection {
   id: string;
   number: string;
@@ -556,6 +632,22 @@ export interface PaperDraft {
   keywords: { zh: string[]; en: string[] };
   acknowledgement: string;
   references: string[];
+  outline_meta?: {
+    version: number;
+    source: "ai" | "fallback";
+    fallback_reason?: string | null;
+    research_type: string;
+    required_elements: string[];
+    coverage: Record<string, boolean>;
+    entity_coverage: number;
+    template_risk: "high" | "low";
+    score: number;
+    issues: string[];
+    recommendations: string[];
+    confirmation_required: boolean;
+    confirmed: boolean;
+    confirmed_at?: string | null;
+  };
   sections: DraftSection[];
   generating: boolean;
   progress: number;
@@ -572,7 +664,7 @@ export interface PaperDraft {
 }
 
 async function draftFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, init);
+  const res = await apiFetch(`${API_BASE}${path}`, init);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -581,6 +673,22 @@ async function draftFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const fetchDraft = (taskId: string): Promise<PaperDraft> =>
   draftFetch(`/api/draft/${taskId}`);
+
+export const confirmDraftOutline = (taskId: string): Promise<{ outline_meta: NonNullable<PaperDraft["outline_meta"]> }> =>
+  draftFetch(`/api/draft/${taskId}/outline/confirm`, { method: "POST" });
+
+export const regenerateDraftOutline = (taskId: string, modelId?: string): Promise<{ sections: DraftSection[]; outline_meta: NonNullable<PaperDraft["outline_meta"]> }> =>
+  draftFetch(`/api/draft/${taskId}/outline/regenerate`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: modelId }),
+  });
+
+export const addDraftOutlineSection = (taskId: string, body: { title: string; gist?: string; parent_id?: string }): Promise<DraftSection> =>
+  draftFetch(`/api/draft/${taskId}/outline/section`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+
+export const deleteDraftOutlineSection = (taskId: string, sectionId: string): Promise<{ ok: boolean }> =>
+  draftFetch(`/api/draft/${taskId}/outline/section/${sectionId}`, { method: "DELETE" });
 
 export const fetchDraftStatus = (
   taskId: string,
@@ -618,6 +726,26 @@ export const addDraftParagraph = (
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ section_id: sectionId, text }),
+  });
+
+export const addDraftTable = (
+  taskId: string,
+  sectionId: string,
+  title = "数据表",
+  headers: string[] = ["指标", "数值"],
+  rows: string[][] = [["", ""]],
+): Promise<DraftParagraph> =>
+  draftFetch(`/api/draft/${taskId}/table`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ section_id: sectionId, title, headers, rows }),
+  });
+
+export const updateDraftBlock = (
+  taskId: string, blockId: string,
+    patch: { text?: string; title?: string; headers?: string[]; rows?: string[][] },
+): Promise<DraftParagraph> =>
+  draftFetch(`/api/draft/${taskId}/block/${blockId}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch),
   });
 
 export const updateDraftParagraph = (
@@ -696,7 +824,7 @@ export const exportPaper = (
   );
 
 export async function fetchTaskStatus(taskId: string): Promise<TaskInfo> {
-  const res = await fetch(`${API_BASE}/api/status/${taskId}`);
+  const res = await apiFetch(`${API_BASE}/api/status/${taskId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -704,13 +832,15 @@ export async function fetchTaskStatus(taskId: string): Promise<TaskInfo> {
 }
 
 export function downloadUrl(taskId: string, file?: string): string {
-  const base = `${API_BASE}/api/download/${taskId}`;
-  return file ? `${base}?file=${encodeURIComponent(file)}` : base;
+  const base = withAuthQuery(`${API_BASE}/api/download/${taskId}`);
+  return file
+    ? `${base}${base.includes("?") ? "&" : "?"}file=${encodeURIComponent(file)}`
+    : base;
 }
 
 /** 论文预览：解析 docx 后的结构化 JSON（标题/章节/段落/图片/表格/参考文献）。 */
 export async function fetchPreview(taskId: string): Promise<PaperPreview> {
-  const res = await fetch(`${API_BASE}/api/preview/${taskId}`);
+  const res = await apiFetch(`${API_BASE}/api/preview/${taskId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -720,18 +850,7 @@ export async function fetchPreview(taskId: string): Promise<PaperPreview> {
 export async function fetchChapters(taskId: string): Promise<{
   chapters: { id: string; level: number; title: string }[];
 }> {
-  const res = await fetch(`${API_BASE}/api/chapters/${taskId}`);
-  if (!res.ok) {
-    throw await toError(res);
-  }
-  return res.json();
-}
-
-export async function fetchImages(taskId: string): Promise<{
-  images: PreviewImage[];
-  count: number;
-}> {
-  const res = await fetch(`${API_BASE}/api/images/${taskId}`);
+  const res = await apiFetch(`${API_BASE}/api/chapters/${taskId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -739,7 +858,7 @@ export async function fetchImages(taskId: string): Promise<{
 }
 
 export async function fetchHistory(): Promise<HistoryRecord[]> {
-  const res = await fetch(`${API_BASE}/api/history`);
+  const res = await apiFetch(`${API_BASE}/api/history`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -747,7 +866,7 @@ export async function fetchHistory(): Promise<HistoryRecord[]> {
 }
 
 export async function fetchHistoryRecord(taskId: string): Promise<HistoryRecord> {
-  const res = await fetch(`${API_BASE}/api/history/${taskId}`);
+  const res = await apiFetch(`${API_BASE}/api/history/${taskId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -755,7 +874,7 @@ export async function fetchHistoryRecord(taskId: string): Promise<HistoryRecord>
 }
 
 export async function deleteHistoryRecord(taskId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/history/${taskId}`, {
+  const res = await apiFetch(`${API_BASE}/api/history/${taskId}`, {
     method: "DELETE",
   });
   if (!res.ok) {
@@ -790,7 +909,7 @@ export interface VersionInfo {
 }
 
 async function postJson<T>(path: string, payload: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await apiFetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -836,7 +955,7 @@ export function restoreVersion(
 }
 
 export async function fetchVersions(taskId: string): Promise<VersionInfo[]> {
-  const res = await fetch(`${API_BASE}/api/revise/versions/${taskId}`);
+  const res = await apiFetch(`${API_BASE}/api/revise/versions/${taskId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -850,7 +969,6 @@ export interface ModelConfig {
   provider: string;
   base_url: string;
   api_key_masked?: string;
-  api_key?: string;
   has_api_key?: boolean;
   model: string;
   is_default: boolean;
@@ -870,7 +988,7 @@ export interface ModelConfigInput {
 }
 
 export async function fetchModels(): Promise<ModelConfig[]> {
-  const res = await fetch(`${API_BASE}/api/models`);
+  const res = await apiFetch(`${API_BASE}/api/models`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -886,7 +1004,7 @@ export async function updateModel(
   id: string,
   input: ModelConfigInput,
 ): Promise<ModelConfig> {
-  const res = await fetch(`${API_BASE}/api/models/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/models/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -898,7 +1016,7 @@ export async function updateModel(
 }
 
 export async function deleteModel(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/models/${id}`, { method: "DELETE" });
+  const res = await apiFetch(`${API_BASE}/api/models/${id}`, { method: "DELETE" });
   if (!res.ok) {
     throw await toError(res);
   }
@@ -926,7 +1044,7 @@ export interface PaperContentManifest {
 export async function fetchPaperContent(
   taskId: string,
 ): Promise<PaperContentManifest> {
-  const res = await fetch(`${API_BASE}/api/content/${taskId}`);
+  const res = await apiFetch(`${API_BASE}/api/content/${taskId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -979,7 +1097,7 @@ export function startFormatTask(formatId: string): Promise<{ ok: boolean }> {
 }
 
 export async function fetchFormatStatus(formatId: string): Promise<FormatTaskInfo> {
-  const res = await fetch(`${API_BASE}/api/format/status/${formatId}`);
+  const res = await apiFetch(`${API_BASE}/api/format/status/${formatId}`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -987,12 +1105,14 @@ export async function fetchFormatStatus(formatId: string): Promise<FormatTaskInf
 }
 
 export function formatDownloadUrl(formatId: string, file?: string): string {
-  const base = `${API_BASE}/api/format/download/${formatId}`;
-  return file ? `${base}?file=${encodeURIComponent(file)}` : base;
+  const base = withAuthQuery(`${API_BASE}/api/format/download/${formatId}`);
+  return file
+    ? `${base}${base.includes("?") ? "&" : "?"}file=${encodeURIComponent(file)}`
+    : base;
 }
 
 export async function fetchFormatTemplates(): Promise<FormatTemplate[]> {
-  const res = await fetch(`${API_BASE}/api/templates`);
+  const res = await apiFetch(`${API_BASE}/api/templates`);
   if (!res.ok) {
     throw await toError(res);
   }
@@ -1010,7 +1130,7 @@ export async function uploadFormatTemplate(
   form.append("major", meta.major);
   form.append("paper_type", meta.paper_type);
   form.append("file", file);
-  const res = await fetch(`${API_BASE}/api/format/templates`, {
+  const res = await apiFetch(`${API_BASE}/api/format/templates`, {
     method: "POST",
     body: form,
   });
@@ -1047,7 +1167,7 @@ export async function polishText(params: {
   instruction?: string;
   model_id?: string;
 }): Promise<{ text: string; operation: PolishOperation }> {
-  const res = await fetch(`${API_BASE}/api/polish`, {
+  const res = await apiFetch(`${API_BASE}/api/polish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params),
@@ -1056,4 +1176,62 @@ export async function polishText(params: {
     throw await toError(res);
   }
   return res.json();
+}
+
+
+
+export type DraftChartKind = "bar" | "line" | "mixed" | "pie";
+export interface DraftChartCreateParams {
+  title_hint?: string;
+  chart_kind?: DraftChartKind;
+  display_scale?: number;
+  illustrative?: boolean;
+}
+export interface DraftChartPatchParams {
+  title?: string;
+  caption?: string;
+  display_scale?: number;
+}
+export async function addDraftChart(taskId: string, sectionId: string, params: DraftChartCreateParams): Promise<DraftParagraph> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/section/" + sectionId + "/chart", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function regenerateDraftChart(taskId: string, blockId: string, params: Pick<DraftChartCreateParams, "chart_kind" | "illustrative"> = {}): Promise<DraftParagraph> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+export async function updateDraftChart(taskId: string, blockId: string, params: DraftChartPatchParams): Promise<DraftParagraph> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+
+export type DraftInsightKind = "chart" | "three_line_table" | "comparison_table" | "problem_solution_table" | "method_table" | "framework_diagram";
+export interface DraftEvidenceRef { section_id: string; paragraph_id?: string; table_id?: string; excerpt: string; field?: string; }
+export interface DraftInsightBlock {
+  kind: DraftInsightKind;
+  title: string;
+  caption: string;
+  scope: "section" | "chapter" | "full_paper";
+  source_status: "user_data" | "text_synthesis" | "outline_synthesis";
+  evidence: DraftEvidenceRef[];
+  table?: { style: "three_line"; headers: string[]; rows: string[][] };
+  chart?: { kind: "bar" | "line" | "mixed" | "pie"; title: string; caption: string; categories: string[]; series: Array<{ name: string; values: number[]; axis: "left" | "right" }>; source_table_id: string };
+  framework?: { nodes: Array<{ id: string; label: string; group: "input" | "process" | "output" | "constraint" }>; edges: Array<{ from: string; to: string; label?: string }> };
+  version: number;
+  generated_at: string;
+}
+export interface DraftInsightParams { scope?: "section" | "chapter" | "full_paper"; intent?: "auto" | "chart" | "comparison_table" | "problem_solution_table" | "method_table" | "framework_diagram"; placement?: "section_end" | "after_current"; }
+export async function createDraftInsight(taskId: string, sectionId: string, params: DraftInsightParams = {}): Promise<DraftParagraph> {
+  const response = await apiFetch(API_BASE + "/api/draft/" + taskId + "/section/" + sectionId + "/insight", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "full_paper", intent: "auto", placement: "section_end", ...params }) });
+  if (!response.ok) throw await toError(response);
+  return response.json();
+}
+export async function regenerateDraftInsight(taskId: string, blockId: string, params: Pick<DraftInsightParams, "scope" | "intent"> = {}): Promise<DraftParagraph> {
+  const response = await apiFetch(API_BASE + "/api/draft/" + taskId + "/insight/" + blockId + "/regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scope: "full_paper", intent: "auto", ...params }) });
+  if (!response.ok) throw await toError(response);
+  return response.json();
 }

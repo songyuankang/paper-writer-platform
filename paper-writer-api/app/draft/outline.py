@@ -9,15 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
 
-from app.models.generate import GenerateRequest
 from app.services import deepseek, deepseek_service
 from app.services.outline_service import (
     OUTLINES,
     SUB_TEMPLATES,
-    allocate_words,
 )
+from app.draft.outline_quality import evaluate_outline
 
 #: fallback 子章节补充：SUB_TEMPLATES 以精确 key 匹配，"文献综述与理论基础"
 #: 无法命中 "文献综述"，这里补全毕业论文第二章的子章节模板。
@@ -58,10 +56,11 @@ def _prompt(name: str) -> str:
 def _extract_json(text: str) -> tuple[dict | None, str | None]:
     """提取模型输出中的 JSON，返回 ``(data, error)``。
 
-    兼容模型常见的三种输出形式：
+    兼容模型常见的四种输出形式：
     - 纯 JSON 对象；
     - ```json ... ``` 代码块包裹；
-    - JSON 前后夹带说明文字。
+    - JSON 前后夹带说明文字；
+    - 首个 JSON 对象后又夹带第二段 JSON、诊断或说明文字。
 
     :return: 解析成功时 ``(dict, None)``；失败时 ``(None, 原因字符串)``。
     """
@@ -72,18 +71,28 @@ def _extract_json(text: str) -> tuple[dict | None, str | None]:
     m = re.search(r"```(?:json)?\s*(.*?)```", content, re.S)
     if m:
         content = m.group(1).strip()
-    # 2) 取第一个 { 到最后一个 }（或 [ 到 ]），容忍前后夹带文字
-    m = re.search(r"\{.*\}|\[.*\]", content, re.S)
-    if not m:
-        return None, "输出中未找到 JSON 对象/数组（无 { } 或 [ ]）"
-    raw = m.group(0)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return None, f"JSON 解析失败: {exc}"
-    if not isinstance(data, dict):
-        return None, f"JSON 顶层不是对象（实际: {type(data).__name__}）"
-    return data, None
+
+    # 2) 从每个可能的 JSON 起点尝试 raw_decode。它只消费一个完整值，
+    # 因此不会把首个对象与后续诊断 JSON 贪婪拼接为无效内容。
+    decoder = json.JSONDecoder()
+    last_error: str | None = None
+    found_json = False
+    for index, char in enumerate(content):
+        if char not in "{[":
+            continue
+        try:
+            data, _ = decoder.raw_decode(content[index:])
+        except json.JSONDecodeError as exc:
+            last_error = str(exc)
+            continue
+        found_json = True
+        if isinstance(data, dict):
+            return data, None
+        last_error = f"JSON 顶层不是对象（实际: {type(data).__name__}）"
+
+    if not found_json:
+        return None, "输出中未找到可解析的 JSON 对象/数组"
+    return None, f"JSON 解析失败: {last_error or '未找到 JSON 对象'}"
 
 
 def _flatten(node: dict, parent: str, idx: int, out: list[dict]) -> None:
@@ -118,13 +127,17 @@ def _ai_outline(paper_info: dict) -> tuple[list[dict] | None, str | None]:
 
     ``error`` 非 None 表示生成/解析失败（原因字符串），此时 ``flat`` 为 None。
     """
+    references = paper_info.get("references") or []
+    ref_text = "\n".join(f"[{index + 1}] {item}" for index, item in enumerate(references[:20])) or "（未选择参考文献）"
     user = _prompt("draft_outline.txt").format(
         title=paper_info.get("title", ""),
         major=paper_info.get("major", ""),
         paper_type=paper_info.get("paper_type", "课程论文"),
         word_count=paper_info.get("word_count", 3000),
+        abstract=(paper_info.get("abstract") or "").strip() or "（未提供摘要）",
         special_requirements=(paper_info.get("special_requirements") or "").strip() or "无",
         keywords="、".join(paper_info.get("keywords") or []) or "（由大纲生成）",
+        references=ref_text,
     )
     content = deepseek.chat(
         [{"role": "system", "content": deepseek_service.system_prompt()},
@@ -147,7 +160,6 @@ def _fallback_outline(paper_info: dict) -> list[dict]:
     """无模型时的确定性大纲：内置章模板 + 小节模板，gist 用章节 focus。"""
     paper_type = paper_info.get("paper_type", "课程论文")
     titles = OUTLINES.get(paper_type, OUTLINES["课程论文"])
-    alloc = allocate_words(len(titles), paper_info.get("word_count", 3000))
     flat: list[dict] = []
     for i, t in enumerate(titles):
         name = t.split(" ", 1)[-1] if " " in t else t
@@ -163,8 +175,9 @@ def _fallback_outline(paper_info: dict) -> list[dict]:
     return flat
 
 
-def build_outline(paper_info: dict) -> list[dict]:
-    """构建三级大纲（扁平列表）。AI 失败回退模板。"""
+def build_outline_with_meta(paper_info: dict, version: int = 1) -> tuple[list[dict], dict]:
+    """构建大纲并记录来源、回退原因与可解释质量诊断。"""
+    fallback_reason: str | None = None
     if deepseek.is_enabled():
         try:
             flat, err = _ai_outline(paper_info)
@@ -173,11 +186,21 @@ def build_outline(paper_info: dict) -> list[dict]:
             flat, err = None, str(exc)
         if flat is not None:
             logger.info("AI 大纲生成成功：章节数量=%d", len(flat))
-            return flat
-        logger.warning("AI 大纲解析失败，进入 fallback：原因=%s", err or "未知")
+            return flat, evaluate_outline(paper_info, flat, source="ai", version=version)
+        fallback_reason = err or "模型输出无法解析为合格的 JSON 大纲"
+        logger.warning("AI 大纲解析失败，进入 fallback：原因=%s", fallback_reason)
     else:
-        logger.info("未配置 AI 模型，使用内置模板大纲（fallback）")
-    return _fallback_outline(paper_info)
+        fallback_reason = "未配置可用模型，使用内置模板大纲"
+        logger.info(fallback_reason)
+    flat = _fallback_outline(paper_info)
+    return flat, evaluate_outline(
+        paper_info, flat, source="fallback", fallback_reason=fallback_reason, version=version,
+    )
+
+
+def build_outline(paper_info: dict) -> list[dict]:
+    """兼容旧调用方：仅返回大纲结构。"""
+    return build_outline_with_meta(paper_info)[0]
 
 
 def outline_text(flat: list[dict]) -> str:

@@ -10,6 +10,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from typing import Iterator
 
 DEFAULT_TIMEOUT = 300
@@ -90,15 +91,56 @@ def _error_message(body: str) -> str:
         return body[:300]
 
 
+def _is_dots_api(base_url: str) -> bool:
+    """识别 Dots.ai 的 OpenAI 兼容端点。"""
+    return "askdiandian.com" in urlparse(base_url).netloc.lower()
+
+
+def _chat_completions_url(base_url: str) -> str:
+    """规范化 OpenAI Chat Completions 地址，并兼容 Dots.ai 的基础 URL。"""
+    url = base_url.rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    if _is_dots_api(url) and not url.endswith("/v1"):
+        url += "/v1"
+    return url + "/chat/completions"
+
+
+def _auth_headers(base_url: str, api_key: str) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if _is_dots_api(base_url):
+        # Dots.ai uses api-key instead of Authorization: Bearer.
+        headers["api-key"] = api_key
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _response_text(data: dict) -> str:
+    """从 OpenAI 兼容响应中稳健提取文本，并提供可诊断错误。"""
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError) as exc:
+        detail = _error_message(json.dumps(data, ensure_ascii=False))
+        raise DeepSeekServerError(f"模型响应缺少 choices[0].message：{detail}") from exc
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    # Dots.ai 在推理配额不足或只返回推理时可能暂时没有最终 content；
+    # 测试接口应获得明确报错，而不是泄露 KeyError('content')。
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning.strip()
+    detail = _error_message(json.dumps(data, ensure_ascii=False))
+    raise DeepSeekServerError(f"模型响应未返回文本内容：{detail}")
+
+
 def _post(base_url: str, api_key: str, payload: dict, timeout: int) -> dict:
-    url = base_url.rstrip("/") + "/chat/completions"
+    url = _chat_completions_url(base_url)
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=_auth_headers(base_url, api_key),
         method="POST",
     )
     try:
@@ -147,7 +189,7 @@ def chat_with(base_url: str, api_key: str, model: str,
     for attempt in range(retries + 1):
         try:
             data = _post(base_url, api_key, payload, timeout)
-            return (data["choices"][0]["message"]["content"] or "").strip()
+            return _response_text(data)
         except (DeepSeekTimeoutError, DeepSeekServerError,
                 DeepSeekRateLimitError) as exc:
             last_error = exc
@@ -191,7 +233,7 @@ def chat_stream_with(base_url: str, api_key: str, model: str,
         "stream": True,
     }
     req = urllib.request.Request(
-        base_url.rstrip("/") + "/chat/completions",
+        _chat_completions_url(base_url),
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Authorization": f"Bearer {api_key}",

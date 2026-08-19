@@ -17,13 +17,13 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.models.generate import (
     GenerateRequest,
-    ChartConfig,
     GenerationMode,
     GenerationStrategy,
     MaterialFile,
     OutlineRequest,
     OutlineResponse,
     AbstractRequest,
+    ManualReferenceRequest,
     ReferenceSearchRequest,
     PaperType,
     ReferenceStyle,
@@ -44,14 +44,74 @@ from app.services import model_service
 from app.services import material_service
 from app.services import reference_search
 from app.generation.service import ContentGenerator
-from app.services.chart_service import CHART_TYPES
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["generate"])
 
+_TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _validate_task_id(task_id: str) -> str:
+    """仅接受本服务生成的 UUID4 hex 任务标识，禁止将路径片段带入输出目录。"""
+    if not _TASK_ID_PATTERN.fullmatch(task_id):
+        raise HTTPException(status_code=400, detail="任务 ID 格式无效")
+    return task_id
+
 
 def _task_dir(task_id: str) -> Path:
-    return settings.output_dir / task_id
+    return settings.output_dir / _validate_task_id(task_id)
+
+
+_MANUAL_REFERENCE_TYPE_LABELS = {
+    "journal": ("期刊论文", "J"),
+    "thesis": ("学位论文", "D"),
+    "conference": ("会议论文", "C"),
+    "book": ("图书", "M"),
+    "report": ("报告", "R"),
+    "web": ("网络资源", "EB/OL"),
+    "standard": ("标准", "S"),
+}
+
+
+def _format_manual_reference(reference: ManualReferenceRequest) -> str:
+    """将手动录入字段格式化为与现有向导兼容的 GB/T 7714 引文字符串。"""
+    _, marker = _MANUAL_REFERENCE_TYPE_LABELS[reference.reference_type]
+    publication = f"{reference.source}, {reference.year}"
+    if reference.reference_type == "journal":
+        volume_issue = reference.volume
+        if reference.issue:
+            volume_issue = f"{volume_issue}({reference.issue})" if volume_issue else f"({reference.issue})"
+        if volume_issue:
+            publication += f", {volume_issue}"
+        if reference.pages:
+            publication += f": {reference.pages}"
+    elif reference.pages:
+        publication += f": {reference.pages}"
+
+    citation = f"{reference.authors}. {reference.title}[{marker}]. {publication}."
+    if reference.doi:
+        citation += f" DOI:{reference.doi}."
+    if reference.url:
+        citation += f" {reference.url}"
+    return citation
+
+
+def _manual_reference_item(reference: ManualReferenceRequest) -> dict:
+    """映射为与外部检索结果一致的候选文献形状，供前端统一勾选和提交。"""
+    type_label, _ = _MANUAL_REFERENCE_TYPE_LABELS[reference.reference_type]
+    return {
+        "title": reference.title,
+        "authors": reference.authors,
+        "source": reference.source,
+        "year": reference.year,
+        "type": type_label,
+        "doi": reference.doi,
+        "abstract": "",
+        "citation": _format_manual_reference(reference),
+        "source_name": "manual",
+        "url": reference.url,
+        "manual": reference.model_dump(),
+    }
 
 
 @router.post("/generate", response_model=GenerateResponse)
@@ -61,11 +121,9 @@ async def generate(
     major: Annotated[str, Form(min_length=1, max_length=100)],
     paper_type: Annotated[PaperType, Form()] = "课程论文",
     word_count: Annotated[int, Form(ge=500, le=100_000)] = 3000,
-    chart_enabled: Annotated[bool, Form()] = False,
     reference_style: Annotated[ReferenceStyle, Form()] = "gb7714",
     generation_mode: Annotated[GenerationMode, Form()] = "auto",
     outline: Annotated[str | None, Form()] = None,
-    chart_config: Annotated[str | None, Form()] = None,
     special_requirements: Annotated[str | None, Form()] = None,
     generation_strategy: Annotated[GenerationStrategy, Form()] = "section",
     model_id: Annotated[str | None, Form()] = None,
@@ -82,24 +140,6 @@ async def generate(
             status_code=400,
             detail="大纲模式（generation_mode=outline）必须提供 outline 参数",
         )
-    parsed_chart_config: ChartConfig | None = None
-    if chart_config and chart_config.strip():
-        try:
-            parsed_chart_config = ChartConfig.model_validate_json(chart_config)
-        except Exception:  # noqa: BLE001 - 转为 400
-            raise HTTPException(
-                status_code=400,
-                detail="chart_config 格式不正确，应为 JSON："
-                       '{"enabled":true,"count":5,"types":["bar","line"]}',
-            )
-        unknown = [t for t in parsed_chart_config.types if t not in CHART_TYPES]
-        if unknown:
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的图表类型：{', '.join(unknown)}。"
-                       f"支持：{', '.join(CHART_TYPES)}",
-            )
-
     # 解析资料类型（JSON 数组，与 files 一一对应）
     kinds: list[str] | None = None
     if material_kinds and material_kinds.strip():
@@ -143,10 +183,9 @@ async def generate(
 
     request = GenerateRequest(
         title=title, major=major, paper_type=paper_type,
-        word_count=word_count, chart_enabled=chart_enabled,
+        word_count=word_count,
         reference_style=reference_style,
         generation_mode=generation_mode, outline=outline,
-        chart_config=parsed_chart_config,
         special_requirements=special_requirements,
         generation_strategy=generation_strategy,
         model_id=model_id,
@@ -186,9 +225,9 @@ async def generate(
     manager.create(task_id)
     history_service.create_record(task_id, request.model_dump())
     manager.submit(task_id)
-    logger.info("Task %s submitted: title=%s major=%s type=%s charts=%s files=%d",
+    logger.info("Task %s submitted: title=%s major=%s type=%s files=%d",
                 task_id, request.title, request.major, request.paper_type,
-                request.chart_enabled, len(materials))
+                len(materials))
     return GenerateResponse(task_id=task_id)
 
 
@@ -268,6 +307,12 @@ async def abstract_generate(request: AbstractRequest) -> dict:
         detail="未配置 AI 模型，请先在「模型设置」中配置并启用模型")
 
 
+@router.post("/references/manual")
+async def manual_reference(request: ManualReferenceRequest) -> dict:
+    """格式化用户手动录入的文献，作为向导第③步可勾选的本地候选条目。"""
+    return {"reference": _manual_reference_item(request)}
+
+
 @router.post("/references/search")
 async def references_search(request: ReferenceSearchRequest) -> dict:
     """搜索真实参考文献（CrossRef 学术库），供创作向导第③步选择。
@@ -291,6 +336,7 @@ async def references_search(request: ReferenceSearchRequest) -> dict:
 @router.get("/status/{task_id}", response_model=TaskInfo)
 async def status(task_id: str, request: Request) -> TaskInfo:
     """查询任务状态、进度与错误信息。"""
+    _validate_task_id(task_id)
     info = request.app.state.task_manager.get(task_id)
     if info is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
@@ -300,6 +346,7 @@ async def status(task_id: str, request: Request) -> TaskInfo:
 @router.get("/generate/stream/{task_id}")
 async def stream_status(task_id: str, request: Request):
     """SSE：实时推送分段生成进度（planning/摘要/逐章/结论/检查…）。"""
+    _validate_task_id(task_id)
     manager = request.app.state.task_manager
 
     async def event_gen():
@@ -402,18 +449,6 @@ async def chapters(task_id: str, request: Request) -> dict:
     ]}
 
 
-@router.get("/images/{task_id}")
-async def images(task_id: str, request: Request) -> dict:
-    """返回论文图表元数据（图号/标题/路径），供缩略图展示。"""
-    task_dir = _require_completed(task_id, request)
-    preview_data = preview_service.parse_preview(
-        task_dir, preview_service.load_request(task_dir))
-    all_images = [
-        img for ch in preview_data["chapters"] for img in ch.get("images", [])
-    ]
-    return {"images": all_images, "count": len(all_images)}
-
-
 @router.get("/download/{task_id}")
 async def download(task_id: str, request: Request,
                    file: str | None = None):
@@ -434,9 +469,12 @@ async def download(task_id: str, request: Request,
         )
 
     if file is not None:
-        target = (task_dir / file).resolve()
-        if not str(target).startswith(str(task_dir.resolve())):
-            raise HTTPException(status_code=400, detail="非法的文件名")
+        task_root = task_dir.resolve()
+        target = (task_root / file).resolve()
+        try:
+            target.relative_to(task_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="非法的文件名") from exc
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"文件不存在: {file}")
         return FileResponse(target, filename=target.name)

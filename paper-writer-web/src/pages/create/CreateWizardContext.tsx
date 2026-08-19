@@ -9,11 +9,14 @@ import {
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   API_BASE,
+  withAuthQuery,
   fetchModels,
   fetchTaskStatus,
   generateAbstract,
   generatePaper,
+  formatManualReference,
   searchReferences,
+  type ManualReferenceInput,
   type ModelConfig,
   type ReferenceItem,
   type TaskInfo,
@@ -139,7 +142,8 @@ export const STEPS = [
   { num: 1, title: "论文选题", en: "Topics" },
   { num: 2, title: "生成摘要", en: "Abstract" },
   { num: 3, title: "参考文献", en: "References" },
-  { num: 4, title: "论文正文", en: "Body" },
+  { num: 4, title: "确认大纲", en: "Outline" },
+  { num: 5, title: "论文正文", en: "Body" },
 ];
 
 export const inputCls =
@@ -151,7 +155,8 @@ const STEP_PATHS: Record<string, number> = {
   "/create/topic": 1,
   "/create/abstract": 2,
   "/create/references": 3,
-  "/create/body": 4,
+  "/create/outline": 4,
+  "/create/body": 5,
 };
 
 const LAST_TASK_STORAGE_KEY = "paper-writer:last-task-id";
@@ -216,6 +221,11 @@ interface CreateWizardContextValue {
   formatSize: (bytes: number) => string;
   loadAbstract: () => Promise<void>;
   loadReferences: () => Promise<void>;
+  saveManualReference: (
+    input: ManualReferenceInput,
+    previousCitation?: string,
+  ) => Promise<ReferenceItem>;
+  deleteManualReference: (citation: string) => void;
   toggleRef: (citation: string) => void;
   handleNext: () => Promise<void>;
   goStep: (target: number) => void;
@@ -259,6 +269,8 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const pollRef = useRef<number | null>(null);
+  // 只允许当前正文路由对应的任务更新页面，防止旧 SSE/轮询覆盖新任务。
+  const activeTaskIdRef = useRef<string | null>(null);
 
   const typeDef =
     PAPER_TYPES.find((t) => t.value === paperType) ?? PAPER_TYPES[0];
@@ -276,6 +288,9 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
    * 防止刷新页面后仍渲染旧的“已生成 / 5%”进度条。
    */
   function clearMissingTask(taskId: string) {
+    if (activeTaskIdRef.current === taskId) {
+      activeTaskIdRef.current = null;
+    }
     if (pollRef.current !== null) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
@@ -310,26 +325,42 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
       .catch(() => setModels([]));
   }, []);
 
-  // 从 URL ?task= 恢复编辑器任务：直达/刷新正文页时不丢编辑器状态
+  // URL 中的 task 永远优先。切换到新任务时必须清空旧编辑器状态，
+  // 否则正文页会先渲染上一份历史论文，直到刷新后才纠正。
   useEffect(() => {
-    const tid = searchParams.get("task") ||
-      window.localStorage.getItem(LAST_TASK_STORAGE_KEY);
-    if (!tid || task) {
+    const urlTaskId = searchParams.get("task");
+    const cachedTaskId = urlTaskId
+      ? null
+      : window.localStorage.getItem(LAST_TASK_STORAGE_KEY);
+    const taskId = urlTaskId || cachedTaskId;
+    if (!taskId) {
       return;
     }
-    fetchTaskStatus(tid)
+    if (task?.task_id === taskId) {
+      activeTaskIdRef.current = taskId;
+      return;
+    }
+
+    activeTaskIdRef.current = taskId;
+    setTask(null);
+    fetchTaskStatus(taskId)
       .then((info) => {
+        if (activeTaskIdRef.current !== taskId) {
+          return;
+        }
         setTask(info);
         // 规范化地址，后续刷新时即使 localStorage 被清理也能恢复任务。
-        if (!searchParams.get("task") && location.pathname === "/create/body") {
-          navigate(`/create/body?task=${encodeURIComponent(tid)}`, { replace: true });
+        if (!urlTaskId && location.pathname === "/create/body") {
+          navigate(`/create/body?task=${encodeURIComponent(taskId)}`, { replace: true });
         }
         if (info.status !== "completed" && info.status !== "failed") {
-          startProgressStream(tid);
+          startProgressStream(taskId);
         }
       })
       .catch(() => {
-        clearMissingTask(tid);
+        if (activeTaskIdRef.current === taskId) {
+          clearMissingTask(taskId);
+        }
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, location.pathname]);
@@ -345,8 +376,10 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
         : target === 3
           ? "/create/references"
           : target === 4
-            ? "/create/body"
-            : "/create/topic";
+            ? "/create/outline"
+            : target === 5
+              ? "/create/body"
+              : "/create/topic";
     navigate(path);
   }
 
@@ -454,15 +487,62 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
         major: `${discipline}·${major}`,
         keywords: keywords.length > 0 ? keywords : undefined,
       });
-      setRefs(res.references);
-      setSelectedRefs(res.references.map((r) => r.citation));
+      const manualRefs = refs.filter((reference) => reference.source_name === "manual");
+      setRefs([...manualRefs, ...res.references]);
+      setSelectedRefs([
+        ...manualRefs.map((reference) => reference.citation),
+        ...res.references.map((reference) => reference.citation),
+      ]);
     } catch (err) {
       setRefError(err instanceof Error ? err.message : "文献搜索失败");
-      setRefs([]);
-      setSelectedRefs([]);
+      const manualRefs = refs.filter((reference) => reference.source_name === "manual");
+      setRefs(manualRefs);
+      setSelectedRefs(manualRefs.map((reference) => reference.citation));
     } finally {
       setRefLoading(false);
     }
+  }
+
+  async function saveManualReference(
+    input: ManualReferenceInput,
+    previousCitation?: string,
+  ): Promise<ReferenceItem> {
+    setRefError(null);
+    try {
+      const { reference } = await formatManualReference(input);
+      const manualReference: ReferenceItem = {
+        ...reference,
+        manual: input,
+        source_name: "manual",
+      };
+      setRefs((prev) => {
+        const withoutPrevious = previousCitation
+          ? prev.filter((item) => item.citation !== previousCitation)
+          : prev;
+        const withoutDuplicate = withoutPrevious.filter(
+          (item) => item.citation !== manualReference.citation,
+        );
+        return [manualReference, ...withoutDuplicate];
+      });
+      setSelectedRefs((prev) => {
+        const withoutPrevious = previousCitation
+          ? prev.filter((citation) => citation !== previousCitation)
+          : prev;
+        return withoutPrevious.includes(manualReference.citation)
+          ? withoutPrevious
+          : [manualReference.citation, ...withoutPrevious];
+      });
+      return manualReference;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "手动添加文献失败";
+      setRefError(message);
+      throw err;
+    }
+  }
+
+  function deleteManualReference(citation: string) {
+    setRefs((prev) => prev.filter((item) => item.citation !== citation));
+    setSelectedRefs((prev) => prev.filter((item) => item !== citation));
   }
 
   function toggleRef(citation: string) {
@@ -498,6 +578,9 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (step === 3) {
+      // 新论文开始时先清空旧任务；旧 SSE 事件也会被 activeTaskIdRef 拦截。
+      activeTaskIdRef.current = null;
+      setTask(null);
       setSubmitting(true);
       try {
         const { task_id } = await generatePaper({
@@ -505,11 +588,6 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
           major: `${discipline}·${major}`,
           paper_type: paperType,
           word_count: wordCount,
-          chart_enabled: paperType !== "开题报告",
-          chart_config:
-            paperType !== "开题报告"
-              ? { enabled: true, count: 3, types: ["bar", "line", "pie"] }
-              : null,
           special_requirements: specialRequirements.trim(),
           model_id: modelId || undefined,
           reference_style: "gb7714",
@@ -521,9 +599,10 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
           references: selectedRefs.length > 0 ? selectedRefs : undefined,
           draft_mode: true,
         });
+        activeTaskIdRef.current = task_id;
         window.localStorage.setItem(LAST_TASK_STORAGE_KEY, task_id);
         startProgressStream(task_id);
-        navigate(`/create/body?task=${encodeURIComponent(task_id)}`);
+        navigate(`/create/outline?task=${encodeURIComponent(task_id)}`);
       } catch (err) {
         setSubmitting(false);
         setError(
@@ -536,13 +615,27 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
   }
 
   function startProgressStream(taskId: string) {
+    activeTaskIdRef.current = taskId;
     const fallbackPoll = () => {
+      if (activeTaskIdRef.current !== taskId) {
+        return;
+      }
       if (pollRef.current !== null) {
         return;
       }
       pollRef.current = window.setInterval(async () => {
+        if (activeTaskIdRef.current !== taskId) {
+          if (pollRef.current !== null) {
+            window.clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+          return;
+        }
         try {
           const info = await fetchTaskStatus(taskId);
+          if (activeTaskIdRef.current !== taskId) {
+            return;
+          }
           setTask(info);
           if (info.status === "completed" || info.status === "failed") {
             if (pollRef.current !== null) {
@@ -552,7 +645,9 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
             setSubmitting(false);
           }
         } catch {
-          clearMissingTask(taskId);
+          if (activeTaskIdRef.current === taskId) {
+            clearMissingTask(taskId);
+          }
         }
       }, 1500);
     };
@@ -561,7 +656,9 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
       fallbackPoll();
       return;
     }
-    const es = new EventSource(`${API_BASE}/api/generate/stream/${taskId}`);
+    const es = new EventSource(
+      withAuthQuery(`${API_BASE}/api/generate/stream/${taskId}`),
+    );
     let finished = false;
     const finish = () => {
       if (finished) {
@@ -569,9 +666,15 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
       }
       finished = true;
       es.close();
-      setSubmitting(false);
+      if (activeTaskIdRef.current === taskId) {
+        setSubmitting(false);
+      }
     };
     es.addEventListener("progress", (e) => {
+      if (activeTaskIdRef.current !== taskId) {
+        es.close();
+        return;
+      }
       try {
         const data = JSON.parse((e as MessageEvent<string>).data);
         setTask({
@@ -587,8 +690,14 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
         });
         if (data.status === "completed" || data.status === "failed") {
           finish();
-          void fetchTaskStatus(taskId).then(setTask).catch(() => {
-            clearMissingTask(taskId);
+          void fetchTaskStatus(taskId).then((info) => {
+            if (activeTaskIdRef.current === taskId) {
+              setTask(info);
+            }
+          }).catch(() => {
+            if (activeTaskIdRef.current === taskId) {
+              clearMissingTask(taskId);
+            }
           });
         }
       } catch {
@@ -597,17 +706,23 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
     });
     es.onerror = () => {
       finish();
-      fallbackPoll();
+      if (activeTaskIdRef.current === taskId) {
+        fallbackPoll();
+      }
     };
   }
 
-  const activeStep = taskDone
-    ? 4
-    : progress >= 70
-      ? 3
-      : progress >= 18
-        ? 2
-        : 1;
+  const activeStep = step === 5
+    ? 5
+    : step === 4
+      ? 4
+      : taskDone
+        ? 5
+        : progress >= 70
+          ? 4
+          : progress >= 18
+            ? 2
+            : 1;
 
   function stepBadge(num: number) {
     if (num < step) {
@@ -689,6 +804,8 @@ export function CreateWizardProvider({ children }: { children: ReactNode }) {
     formatSize,
     loadAbstract,
     loadReferences,
+    saveManualReference,
+    deleteManualReference,
     toggleRef,
     handleNext,
     goStep,

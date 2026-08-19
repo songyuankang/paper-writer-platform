@@ -14,7 +14,6 @@ import json
 import re
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterator
 from pathlib import Path
 
@@ -43,6 +42,21 @@ _MD_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S.*$")
 _MD_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 _MD_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+[.、])\s+")
 _SENTENCE_END_RE = re.compile(r"[。！？；：]$")
+_SECTION_DRAFT_LABEL_RE = re.compile(
+    r"^\s*第[一二三四五六七八九十百\d]+段(?:具体)?(?:草稿|正文)\s*[：:]\s*"
+)
+_INTERNAL_INSTRUCTION_PATTERNS = (
+    re.compile(r"(?:现在(?:开始)?起草(?:段落|正文)?|现在写正式内容|让我们(?:慢慢)?(?:构思|具体计算))"),
+    re.compile(r"(?:需要(?:满足|达到)(?:约|至少)?\s*\d+\s*字|每(?:个)?段落约\s*\d+\s*(?:[-—]\s*\d+\s*)?字)"),
+    re.compile(r"(?:注意|请)(?:不要|勿).*(?:输出)?(?:标题|markdown)" , re.I),
+    re.compile(r"段落(?:之间|间)空行"),
+)
+
+
+def _is_internal_generation_instruction(paragraph: str) -> bool:
+    """判断模型是否误输出了写作计划、字数计算或格式指令。"""
+    compact = re.sub(r"\s+", "", paragraph)
+    return bool(compact) and any(pattern.search(compact) for pattern in _INTERNAL_INSTRUCTION_PATTERNS)
 
 
 def _clean_generated_paragraphs(text: str) -> list[str]:
@@ -64,6 +78,10 @@ def _clean_generated_paragraphs(text: str) -> list[str]:
             lines.append("")
             continue
         line = _MD_LIST_RE.sub("", line)
+        line = _SECTION_DRAFT_LABEL_RE.sub("", line)
+        if not line:
+            lines.append("")
+            continue
         line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)
         line = re.sub(r"__(.+?)__", r"\1", line)
         line = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", line)
@@ -92,7 +110,10 @@ def _clean_generated_paragraphs(text: str) -> list[str]:
             result.extend(ln.strip() for ln in group if ln.strip())
         else:
             result.append(" ".join(ln.strip() for ln in group if ln.strip()))
-    return [p for p in result if p.strip()]
+    return [
+        paragraph for paragraph in result
+        if paragraph.strip() and not _is_internal_generation_instruction(paragraph)
+    ]
 
 
 def _effective_text_length(text: str) -> int:
@@ -139,23 +160,42 @@ def _apply_leaf_budgets(sections: list[dict], target_chars: int) -> None:
         section["min_chars"] = max(160, int(budget * 0.88))
 
 
-def _split_en_abstract(text: str) -> tuple[str, list[str]]:
-    """把英文摘要生成结果拆分为（摘要, 关键词列表）。
+_EN_ABSTRACT_PLACEHOLDER_RE = re.compile(r"<\s*(?:英文摘要|英文关键词)\s*>", re.I)
+_EN_ABSTRACT_META_RE = re.compile(
+    r"(?:我们需要|用户(?:要求|给的)|格式(?:为)?|注意|翻译摘要|摘要内容|"
+    r"输出英文|关键词(?:可能|提取)|Abstract\s*[：:]\s*<|Keywords?\s*[：:]\s*<)",
+    re.I,
+)
+_CJK_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
-    AI 输出格式为 ``Abstract: <英文摘要> Keywords: <关键词1, 关键词2>``：
-    关键词提取到 ``keywords.en``，摘要中剥离 ``Abstract:`` 前缀与
-    ``Keywords:`` 行，避免关键词混入摘要正文。
+
+def _split_en_abstract(text: str) -> tuple[str, list[str]]:
+    """把 AI 返回的最终英文摘要拆分为（摘要, 关键词列表）。
+
+    仅接受 ``Abstract: <English text>`` 与 ``Keywords: <English keywords>``
+    的最终输出；模型泄漏的中文规划、占位符或格式说明不会写入草稿。
     """
-    abstract = text.strip()
+    raw = text.strip()
+    if not raw or _EN_ABSTRACT_PLACEHOLDER_RE.search(raw) or _EN_ABSTRACT_META_RE.search(raw):
+        return "", []
+
+    abstract = raw
     keywords: list[str] = []
-    m = re.search(r"Keywords?\s*[：:]\s*(.+)", abstract, flags=re.I | re.S)
-    if m:
-        parsed = [k.strip() for k in re.split(r"[，,;；]", m.group(1)) if k.strip()]
-        keywords = parsed[:5]
+    match = re.search(r"Keywords?\s*[：:]\s*(.+)", abstract, flags=re.I | re.S)
+    if match:
+        parsed = [item.strip() for item in re.split(r"[，,;；]", match.group(1)) if item.strip()]
+        keywords = [
+            item for item in parsed
+            if re.search(r"[A-Za-z]", item)
+            and not _CJK_TEXT_RE.search(item)
+            and not _EN_ABSTRACT_META_RE.search(item)
+        ][:5]
     abstract = re.sub(r"Keywords?\s*[：:].*", "", abstract,
                       flags=re.I | re.S).strip()
     abstract = re.sub(r"^Abstract\s*[：:]\s*", "", abstract,
                       flags=re.I).strip()
+    if not abstract or _CJK_TEXT_RE.search(abstract) or not re.search(r"[A-Za-z]", abstract):
+        return "", []
     return abstract, keywords
 
 
@@ -213,15 +253,20 @@ class DraftService:
 
     # -- 构建 --------------------------------------------------------------
 
-    def build(self, paper_info: dict, model_id: str | None = None) -> dict:
+    def build(self, paper_info: dict, model_id: str | None = None,
+              require_confirmation: bool = False) -> dict:
         """根据论文信息构建草稿（生成三级大纲 + 每叶主旨）。"""
         with self.lock:
             ctx = self._model_ctx(model_id)
             if ctx:
                 with ctx:
-                    sections = outline_mod.build_outline(paper_info)
+                    sections, outline_meta = outline_mod.build_outline_with_meta(paper_info)
             else:
-                sections = outline_mod.build_outline(paper_info)
+                sections, outline_meta = outline_mod.build_outline_with_meta(paper_info)
+            outline_meta["confirmation_required"] = require_confirmation
+            outline_meta["confirmed"] = not require_confirmation
+            if not require_confirmation:
+                outline_meta["confirmed_at"] = "legacy_or_direct_build"
             target_body_chars = max(int(paper_info.get("word_count", 3000)), 500)
             _apply_leaf_budgets(sections, target_body_chars)
             draft = {
@@ -239,6 +284,7 @@ class DraftService:
                 "keywords": {"zh": paper_info.get("keywords") or [], "en": []},
                 "acknowledgement": "",
                 "references": list(paper_info.get("references") or []),
+                "outline_meta": outline_meta,
                 "sections": sections,
                 "generating": False,
                 "progress": 0,
@@ -253,6 +299,118 @@ class DraftService:
             }
             self.save(draft)
             return draft
+
+    # -- 大纲确认与结构编辑 ------------------------------------------------
+
+    def outline_meta(self) -> dict:
+        draft = self.load()
+        return dict(draft.get("outline_meta") or {})
+
+    def ensure_outline_confirmed(self) -> None:
+        meta = self.outline_meta()
+        if meta.get("confirmation_required") and not meta.get("confirmed"):
+            raise ValueError("请先在大纲确认页核对并确认目录后，再生成正文。")
+
+    def confirm_outline(self) -> dict:
+        with self.lock:
+            draft = self.load()
+            meta = dict(draft.get("outline_meta") or {})
+            meta["confirmation_required"] = True
+            meta["confirmed"] = True
+            from datetime import datetime, timezone
+            meta["confirmed_at"] = datetime.now(timezone.utc).isoformat()
+            draft["outline_meta"] = meta
+            self.save(draft)
+            return meta
+
+    def regenerate_outline(self, model_id: str | None = None) -> dict:
+        with self.lock:
+            draft = self.load()
+            if _body_char_count(draft) > 0:
+                raise ValueError("正文已开始生成，不能直接重生成大纲；请新建任务或先清空正文。")
+            paper_info = self._paper_info(draft)
+            old_meta = dict(draft.get("outline_meta") or {})
+            version = int(old_meta.get("version") or 1) + 1
+            ctx = self._model_ctx(model_id)
+            if ctx:
+                with ctx:
+                    sections, meta = outline_mod.build_outline_with_meta(paper_info, version=version)
+            else:
+                sections, meta = outline_mod.build_outline_with_meta(paper_info, version=version)
+            _apply_leaf_budgets(sections, int(paper_info["word_count"]))
+            draft["sections"] = sections
+            draft["outline_meta"] = meta
+            draft["total"] = len(_leaf_ids(sections))
+            draft["done"] = 0
+            draft["progress"] = 0
+            self.save(draft)
+            return draft
+
+    def _assert_outline_editable(self, draft: dict) -> None:
+        if _body_char_count(draft) > 0:
+            raise ValueError("正文已开始生成，不能修改目录结构；仍可修改章节标题与主旨。")
+
+    def _reindex_outline(self, sections: list[dict]) -> list[dict]:
+        nodes = {str(item.get("id")): dict(item) for item in sections}
+        children: dict[str, list[str]] = {node_id: [] for node_id in nodes}
+        roots: list[str] = []
+        for node_id in nodes:
+            parent_id = node_id.rsplit("-", 1)[0] if "-" in node_id else ""
+            if parent_id in nodes:
+                children[parent_id].append(node_id)
+            else:
+                roots.append(node_id)
+        ordered: list[dict] = []
+        def walk(old_id: str, parent: str, index: int) -> None:
+            node = nodes[old_id]
+            level = 1 if not parent else min(int(node.get("level") or parent.count("-") + 2), 3)
+            new_id = str(index + 1) if not parent else f"{parent}-{index + 1}"
+            number = f"第{['零','一','二','三','四','五','六','七','八','九','十'][index + 1] if index < 10 else index + 1}章" if not parent else new_id.replace("-", ".")
+            node.update({"id": new_id, "number": number, "level": level, "children": []})
+            ordered.append(node)
+            for child_index, child_id in enumerate(children.get(old_id, [])):
+                walk(child_id, new_id, child_index)
+        for root_index, root_id in enumerate(roots):
+            walk(root_id, "", root_index)
+        return ordered
+
+    def add_outline_section(self, title: str, gist: str = "", parent_id: str | None = None) -> dict:
+        with self.lock:
+            draft = self.load()
+            self._assert_outline_editable(draft)
+            sections = list(draft.get("sections") or [])
+            if parent_id and not any(item.get("id") == parent_id for item in sections):
+                raise ValueError("父章节不存在。")
+            level = 1 if not parent_id else min(next(int(item.get("level") or 1) for item in sections if item.get("id") == parent_id) + 1, 3)
+            if parent_id and level > 3:
+                raise ValueError("当前仅支持三级目录。")
+            temp_id = f"new-{uuid.uuid4().hex[:8]}"
+            sections.append({"id": temp_id, "number": "", "title": title.strip(), "level": level, "gist": gist.strip(), "paragraphs": [], "children": [], "_parent": parent_id or ""})
+            # 临时 parent 用于构树；转换成可识别的虚拟层级关系后重排。
+            if parent_id:
+                sections[-1]["id"] = f"{parent_id}-999"
+            sections = self._reindex_outline(sections)
+            _apply_leaf_budgets(sections, int((draft.get("meta") or {}).get("word_count", 3000)))
+            draft["sections"] = sections
+            draft["total"] = len(_leaf_ids(sections))
+            self.save(draft)
+            return sections[-1]
+
+    def delete_outline_section(self, section_id: str) -> None:
+        with self.lock:
+            draft = self.load()
+            self._assert_outline_editable(draft)
+            sections = list(draft.get("sections") or [])
+            kept = [item for item in sections if item.get("id") != section_id and not str(item.get("id")).startswith(section_id + "-")]
+            if len(kept) == len(sections):
+                raise ValueError("章节不存在。")
+            if not kept:
+                raise ValueError("目录至少保留一个章节。")
+            kept = self._reindex_outline(kept)
+            _apply_leaf_budgets(kept, int((draft.get("meta") or {}).get("word_count", 3000)))
+            draft["sections"] = kept
+            draft["total"] = len(_leaf_ids(kept))
+            self.save(draft)
 
     # -- 段落 / 小节操作 ----------------------------------------------------
 
@@ -355,6 +513,7 @@ class DraftService:
         """
         with self.lock:
             draft = self.load()
+            self.ensure_outline_confirmed()
             section = self._find_section(draft, section_id)
             if not (section.get("gist") or "").strip():
                 raise ValueError(f"小节「{section['title']}」没有段落主旨，请先填写主旨")
@@ -396,7 +555,9 @@ class DraftService:
             if not text.strip():
                 text = (f"（生成结果为空）{section['title']}："
                         "请检查模型配置后重新生成。")
-            segments = _clean_generated_paragraphs(text) or [text.strip()]
+            segments = _clean_generated_paragraphs(text)
+            if not segments:
+                raise deepseek.DeepSeekModelError("模型未返回可用正文，请重新生成。")
         except deepseek.DeepSeekError as exc:
             segments = [f"（生成失败：{exc}）"]
         with self.lock:
@@ -509,8 +670,12 @@ class DraftService:
         with self.lock:
             draft = self.load()
             zh = draft.get("abstract", {}).get("zh", "")
-            user = (f"请将以下论文摘要翻译为英文，并给出英文关键词（逗号分隔）。\n"
-                    f"格式：\nAbstract：<英文摘要>\nKeywords：<英文关键词>\n\n{zh}")
+            user = (
+                "请将以下中文摘要翻译为英文，并给出英文关键词。最终回复只能包含两行英文，"
+                "第一行必须为 `Abstract: ` 加英文摘要，第二行必须为 `Keywords: ` 加 3—5 个英文关键词（英文逗号分隔）。"
+                "不得输出中文，不得输出思考、计划、格式说明、占位符或任何额外文字。\n\n"
+                f"中文摘要：\n{zh}"
+            )
         ctx = self._model_ctx(model_id)
         try:
             if ctx:
@@ -535,7 +700,7 @@ class DraftService:
 
     def oneclick(self, model_id: str | None = None,
                  progress_cb=None) -> dict:
-        """一键全文：首轮生成后验收字数，并对不足小节定向补写。"""
+        """一键全文：生成正文、补足字数，并补齐缺失的英文摘要与致谢。"""
         with self.lock:
             draft = self.load()
             target_chars = max(int((draft.get("meta") or {}).get("word_count", 3000)), 500)
@@ -605,6 +770,17 @@ class DraftService:
                     self._supplement_section(
                         section["id"], min(max(deficit, global_share), 1200), model_id
                     )
+
+        with self.lock:
+            draft = self.load()
+            needs_en_abstract = not (draft.get("abstract", {}).get("en") or "").strip()
+            needs_acknowledgement = not (draft.get("acknowledgement") or "").strip()
+
+        # 一键全文应交付完整稿件；已有用户手动内容时不覆盖。
+        if needs_en_abstract:
+            self.generate_en_abstract(model_id)
+        if needs_acknowledgement:
+            self.generate_acknowledgement(model_id)
 
         with self.lock:
             draft = self.load()
@@ -715,6 +891,83 @@ class DraftService:
             htype = {1: "h1", 2: "h2", 3: "h3"}.get(s["level"], "h2")
             spec_sections.append({"type": htype, "text": f"{s['number']} {s['title']}"})
             for p in s["paragraphs"]:
+                # Structured draft block export: editor and Word share the same stored block.
+                kind = p.get("type", "paragraph")
+                if kind == "insight":
+                    # semantic-insight export adapter: retain evidence-first summaries
+                    # as a readable table or caption in the existing DOCX pipeline.
+                    insight_kind = str(p.get("kind") or "")
+                    title = str(p.get("title") or "章节要点归纳")
+                    caption = str(p.get("caption") or "")
+                    source_status = str(p.get("source_status") or "text_synthesis")
+                    if insight_kind == "chart":
+                        chart = p.get("chart") or {}
+                        if chart.get("kind") == "pie":
+                            headers = ["类别", "数值"]
+                            rows = [[str(item.get("name") or ""), str(item.get("value") or "")] for item in (chart.get("pie") or [])]
+                        else:
+                            series = chart.get("series") or []
+                            headers = ["类别"] + [str(item.get("name") or "指标") for item in series]
+                            rows = []
+                            for index, category in enumerate(chart.get("categories") or []):
+                                rows.append([str(category)] + [str((item.get("values") or [])[index]) if len(item.get("values") or []) > index else "" for item in series])
+                        if rows:
+                            spec_sections.append({"type": "table", "title": f"图表数据：{title}", "headers": headers, "rows": rows})
+                    elif insight_kind in {"three_line_table", "comparison_table", "problem_solution_table", "method_table"}:
+                        table = p.get("table") or {}
+                        headers = [str(item) for item in (table.get("headers") or [])]
+                        rows = [[str(cell) for cell in row] for row in (table.get("rows") or [])]
+                        if headers and rows:
+                            spec_sections.append({"type": "table", "title": title, "headers": headers, "rows": rows})
+                    elif insight_kind == "framework_diagram":
+                        labels = [str(item.get("label") or "") for item in ((p.get("framework") or {}).get("nodes") or [])]
+                        if labels:
+                            spec_sections.append({"type": "p", "text": "研究结构：" + " → ".join(labels)})
+                    evidence = p.get("evidence") or []
+                    evidence_note = "；".join(str(item.get("excerpt") or "")[:80] for item in evidence[:3] if item.get("excerpt"))
+                    disclosure = "数据来源：用户维护的数据表。" if source_status == "user_data" else "内容归纳基于论文目录与已列正文证据，不代表统计结论。"
+                    spec_sections.append({"type": "p", "text": f"{title}。{caption}{disclosure}{(' 证据：' + evidence_note) if evidence_note else ''}"})
+                # semantic-insight export adapter
+                elif kind == "chart":
+                    # chart-block export fallback: preserve its validated data in
+                    # the document even when a renderer-specific image asset is absent.
+                    chart = p.get("chart") or {}
+                    chart_title = str(p.get("title") or chart.get("title") or "图表")
+                    if chart.get("kind") == "pie":
+                        headers = ["类别", "数值"]
+                        rows = [
+                            [str(item.get("name") or ""), str(item.get("value") or "")]
+                            for item in (chart.get("pie") or [])
+                        ]
+                    else:
+                        categories = [str(item) for item in (chart.get("categories") or [])]
+                        series = chart.get("series") or []
+                        headers = ["类别"] + [str(item.get("name") or "指标") for item in series]
+                        rows = []
+                        for index, category in enumerate(categories):
+                            rows.append([category] + [str((item.get("values") or [])[index]) if len(item.get("values") or []) > index else "" for item in series])
+                    if rows:
+                        spec_sections.append({
+                            "type": "table",
+                            "title": f"图表数据：{chart_title}",
+                            "headers": headers,
+                            "rows": rows,
+                        })
+                    caption = str(p.get("caption") or chart.get("caption") or "")
+                    provenance = str(p.get("provenance") or "")
+                    notice = "（模型/示意生成，未自动检索或核验外部来源）" if provenance != "user_provided" else ""
+                    spec_sections.append({"type": "p", "text": f"图：{chart_title}。{caption}{notice}"})
+                # chart-block export fallback
+                elif kind == "table":
+                    spec_sections.append({
+                        "type": "table",
+                        "title": str(p.get("title") or "数据表"),
+                        "headers": list(p.get("headers") or []),
+                        "rows": list(p.get("rows") or []),
+                    })
+                    continue
+                if kind == "chart":
+                    continue
                 text = (p.get("text") or "").strip()
                 if text:
                     spec_sections.append({"type": "p", "text": text})
@@ -741,7 +994,8 @@ class DraftService:
         }
         files = formatter_service.format_paper(
             self.task_id, self.task_dir, paper, spec,
-            charts=None, template_path=template_path, template_id=template_id)
+            template_path=template_path, template_id=template_id
+        )
         if self.task_manager:
             self.task_manager.update(
                 self.task_id, progress=100, status=TaskStatus.completed,

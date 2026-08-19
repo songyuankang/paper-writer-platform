@@ -17,3 +17,8 @@ __pycache__/
 dom_models*.txt
 Thumbs.db
 .DS_Store
+
+# Runtime diagnostics and dynamically created format templates
+*.err
+paper-writer-api/app/formatter/templates/[0-9a-f][0-9a-f]*/
+paper-writer-api/app/formatter/templates/mine/

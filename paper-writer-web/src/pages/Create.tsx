@@ -65,7 +65,7 @@ function CreateLayoutContent() {
       </header>
 
       <main className="mx-auto max-w-5xl px-4 py-8">
-        <div className="mb-8 grid grid-cols-4 gap-2">
+        <div className="mb-8 grid grid-cols-2 gap-2 sm:grid-cols-5">
           {STEPS.map((s) => {
             // 以当前路由为准，避免已完成任务的 progress=100 覆盖当前页面步骤。
             const isActive = s.num === step;
@@ -85,13 +85,7 @@ function CreateLayoutContent() {
                       isActive ? "text-black" : "text-neutral-500"
                     }`}
                   >
-                    {s.num === 1
-                      ? "① "
-                      : s.num === 2
-                        ? "② "
-                        : s.num === 3
-                          ? "③ "
-                          : "④ "}
+                    {s.num === 1 ? "① " : s.num === 2 ? "② " : s.num === 3 ? "③ " : s.num === 4 ? "④ " : "⑤ "}
                     {s.title}
                   </span>
                 </div>

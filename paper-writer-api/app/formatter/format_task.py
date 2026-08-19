@@ -5,14 +5,12 @@
 
 from __future__ import annotations
 
-import io
 import json
 import logging
 import shutil
 import subprocess
 import threading
 import uuid
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -214,7 +212,7 @@ def _build_format_report(task_dir: Path, docx_path: Path, spec: dict,
         f"| 参考文献 | {status(bool(refs), f'（{len(refs)} 条）')} |",
         f"| 图表 | {status(bool(charts), f'（{figures} 张内嵌图）')} |",
         "",
-        f"## 说明",
+        "## 说明",
         "",
         f"- {pdf_note}",
         "- 如需 PDF 请在部署环境安装 LibreOffice 后重新执行格式处理",

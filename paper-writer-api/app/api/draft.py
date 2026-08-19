@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 
 from fastapi import APIRouter, HTTPException, Request
@@ -9,9 +10,27 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.draft.service import DraftService
+from app.draft import block_service
+from app.draft.insight_blocks import (
+    InsightCreateRequest,
+    InsightPatchRequest,
+    InsightRegenerateRequest,
+    create_insight_block,
+    patch_insight_block,
+    regenerate_insight_block,
+)
+from app.draft.chart_blocks import (
+    ChartCreateRequest,
+    ChartPatchRequest,
+    ChartRegenerateRequest,
+    create_chart_block,
+    patch_chart_block,
+    regenerate_chart_block,
+)
 from app.services import history_service
 
 router = APIRouter(prefix="/api/draft", tags=["draft"])
+_TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class SectionUpdateRequest(BaseModel):
@@ -37,10 +56,35 @@ class GenerateRequest(BaseModel):
 
 
 def _service(task_id: str, request: Request) -> DraftService:
+    if not _TASK_ID_PATTERN.fullmatch(task_id):
+        raise HTTPException(status_code=400, detail="任务 ID 格式无效")
     task_dir = settings.output_dir / task_id
     if not task_dir.is_dir():
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     return DraftService(task_id, task_dir, request.app.state.task_manager)
+
+
+
+class TableBlockAddRequest(BaseModel):
+    section_id: str
+    title: str = Field("数据表", max_length=200)
+    headers: list[str] = Field(default_factory=lambda: ["指标", "数值"])
+    rows: list[list[str]] = Field(default_factory=lambda: [["", ""]])
+
+class BlockUpdateRequest(BaseModel):
+    text: str | None = Field(None, max_length=20_000)
+    title: str | None = Field(None, max_length=200)
+    headers: list[str] | None = None
+    rows: list[list[str]] | None = None
+
+class OutlineRegenerateRequest(BaseModel):
+    model_id: str | None = Field(None)
+
+
+class OutlineAddRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    gist: str = Field("", max_length=500)
+    parent_id: str | None = Field(None)
 
 
 @router.get("/{task_id}")
@@ -49,6 +93,48 @@ def get_draft(task_id: str, request: Request) -> dict:
     if not draft:
         raise HTTPException(status_code=404, detail="草稿不存在，请重新生成")
     return draft
+
+
+@router.get("/{task_id}/outline")
+def get_outline_review(task_id: str, request: Request) -> dict:
+    draft = _service(task_id, request).load()
+    if not draft:
+        raise HTTPException(status_code=404, detail="草稿不存在，请重新生成")
+    return {"title": draft.get("title", ""), "sections": draft.get("sections", []), "outline_meta": draft.get("outline_meta", {})}
+
+
+@router.post("/{task_id}/outline/confirm")
+def confirm_outline(task_id: str, request: Request) -> dict:
+    try:
+        return {"outline_meta": _service(task_id, request).confirm_outline()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/outline/regenerate")
+def regenerate_outline(task_id: str, body: OutlineRegenerateRequest, request: Request) -> dict:
+    try:
+        draft = _service(task_id, request).regenerate_outline(body.model_id)
+        return {"sections": draft.get("sections", []), "outline_meta": draft.get("outline_meta", {})}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/outline/section")
+def add_outline_section(task_id: str, body: OutlineAddRequest, request: Request) -> dict:
+    try:
+        return _service(task_id, request).add_outline_section(body.title, body.gist, body.parent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/{task_id}/outline/section/{section_id}")
+def delete_outline_section(task_id: str, section_id: str, request: Request) -> dict:
+    try:
+        _service(task_id, request).delete_outline_section(section_id)
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{task_id}/status")
@@ -124,6 +210,20 @@ def move_paragraph(task_id: str, pid: str, body: MoveRequest,
     return {"ok": True}
 
 
+@router.post("/{task_id}/table")
+def add_table_block(task_id: str, body: TableBlockAddRequest, request: Request) -> dict:
+    try:
+        return block_service.add_table(_service(task_id, request), body.section_id, body.title, body.headers, body.rows)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+@router.put("/{task_id}/block/{block_id}")
+def update_content_block(task_id: str, block_id: str, body: BlockUpdateRequest, request: Request) -> dict:
+    try:
+        return block_service.update_block(_service(task_id, request), block_id, body.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 @router.post("/{task_id}/oneclick")
 def oneclick(task_id: str, body: GenerateRequest, request: Request) -> dict:
     service = _service(task_id, request)
@@ -132,6 +232,10 @@ def oneclick(task_id: str, body: GenerateRequest, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="草稿不存在")
     if draft.get("generating"):
         raise HTTPException(status_code=400, detail="正在生成中，请稍候")
+    try:
+        service.ensure_outline_confirmed()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def run() -> None:
         try:
@@ -172,3 +276,51 @@ def export(task_id: str, request: Request,
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"导出失败：{exc}")
     return {"ok": True, "files": files}
+
+
+@router.post("/{task_id}/section/{section_id}/chart")
+def add_chart(task_id: str, section_id: str, body: ChartCreateRequest, request: Request):
+    try:
+        return create_chart_block(_service(task_id, request), section_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/{task_id}/chart/{block_id}/regenerate")
+def regenerate_chart(task_id: str, block_id: str, body: ChartRegenerateRequest, request: Request):
+    try:
+        return regenerate_chart_block(_service(task_id, request), block_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.patch("/{task_id}/chart/{block_id}")
+def patch_chart(task_id: str, block_id: str, body: ChartPatchRequest, request: Request):
+    try:
+        return patch_chart_block(_service(task_id, request), block_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/{task_id}/section/{section_id}/insight")
+def add_insight(task_id: str, section_id: str, body: InsightCreateRequest, request: Request):
+    try:
+        return create_insight_block(_service(task_id, request), section_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/{task_id}/insight/{block_id}/regenerate")
+def regenerate_insight(task_id: str, block_id: str, body: InsightRegenerateRequest, request: Request):
+    try:
+        return regenerate_insight_block(_service(task_id, request), block_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.patch("/{task_id}/insight/{block_id}")
+def patch_insight(task_id: str, block_id: str, body: InsightPatchRequest, request: Request):
+    try:
+        return patch_insight_block(_service(task_id, request), block_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

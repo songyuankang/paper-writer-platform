@@ -139,6 +139,20 @@ class TestCleanGeneratedParagraphs(unittest.TestCase):
     def test_heading_only_text_returns_empty(self):
         self.assertEqual(_clean_generated_paragraphs("## 只有标题"), [])
 
+    def test_filters_internal_generation_instructions_and_draft_labels(self):
+        text = (
+            "现在起草段落。\n\n"
+            "需要满足约915字。让我们具体计算，每个段落约180-230字。\n\n"
+            "现在写正式内容。注意不要输出标题，不要用markdown，段落间空行。\n\n"
+            "让我们慢慢构思内容。\n\n"
+            "第一段具体草稿：\n\n"
+            "留学生群体的身份认同受到教育制度与跨文化经验的共同影响[1]。"
+        )
+        self.assertEqual(
+            _clean_generated_paragraphs(text),
+            ["留学生群体的身份认同受到教育制度与跨文化经验的共同影响[1]。"],
+        )
+
 
 class TestSplitEnAbstract(unittest.TestCase):
     """英文摘要 Keywords 拆分测试。"""
@@ -158,6 +172,15 @@ class TestSplitEnAbstract(unittest.TestCase):
     def test_no_keywords_line(self):
         abstract, keywords = _split_en_abstract("Plain abstract text.")
         self.assertEqual(abstract, "Plain abstract text.")
+        self.assertEqual(keywords, [])
+
+    def test_rejects_prompt_leak_and_placeholders(self):
+        abstract, keywords = _split_en_abstract(
+            "我们需要按用户要求来做：翻译摘要为英文，给出英文关键词。"
+            "格式：Abstract: <英文摘要>；Keywords: <英文关键词>。"
+            "注意用户给的是中文摘要内容，需要准确翻译。"
+        )
+        self.assertEqual(abstract, "")
         self.assertEqual(keywords, [])
 
 
@@ -188,6 +211,18 @@ class TestGenerateSectionCleaning(unittest.TestCase):
         self.assertNotIn("##", paras[0]["text"])
         self.assertNotIn("小标题", paras[0]["text"])
         self.assertEqual(paras[0]["text"], "正文段落内容。")
+
+    def test_generation_does_not_persist_internal_writing_instructions(self):
+        _generate(
+            self.service,
+            "现在起草段落。\n\n需要满足约915字，每个段落约180-230字。\n\n"
+            "现在写正式内容。注意不要输出标题，不要用markdown。\n\n"
+            "第一段具体草稿：\n\n"
+            "留学生在跨文化环境中会持续调整其身份认同边界[1]。",
+        )
+        paras = _leaf_paragraphs(self.service)
+        self.assertEqual(len(paras), 1)
+        self.assertEqual(paras[0]["text"], "留学生在跨文化环境中会持续调整其身份认同边界[1]。")
 
     def test_paragraph_ids_unique_and_preserved(self):
         # G. 1 段扩展为多段：ID 唯一、原 ID 保留、新 ID 符合现有规则
@@ -232,6 +267,67 @@ class TestGenerateSectionCleaning(unittest.TestCase):
         self.assertEqual(result, "EN abstract text.")
         self.assertEqual(draft["abstract"]["en"], "EN abstract text.")
         self.assertEqual(draft["keywords"]["en"], ["k1", "k2", "k3"])
+
+    def test_generate_en_abstract_does_not_persist_prompt_leak(self):
+        with mock.patch.object(DraftService, "_model_ctx",
+                               return_value=nullcontext()), \
+             mock.patch("app.draft.service.deepseek.chat",
+                        return_value=(
+                            "我们需要按用户要求来做：翻译摘要为英文。"
+                            "格式：Abstract: <英文摘要>；Keywords: <英文关键词>。"
+                        )):
+            result = self.service.generate_en_abstract(None)
+        draft = self.service.load()
+        self.assertEqual(result, "")
+        self.assertEqual(draft["abstract"]["en"], "")
+        self.assertEqual(draft["keywords"]["en"], [])
+
+
+class TestOneclickCompleteness(unittest.TestCase):
+    """一键全文应补齐附属内容，但不得覆盖用户已有内容。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.service = _make_service(Path(self._tmp.name), "oneclick-completeness")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _save_complete_body_draft(self, *, abstract_en: str = "", acknowledgement: str = ""):
+        self.service.save({
+            "title": "测试论文",
+            "meta": {"word_count": 500, "completion_min_chars": 475},
+            "abstract": {"zh": "中文摘要", "en": abstract_en},
+            "keywords": {"zh": ["测试"], "en": []},
+            "acknowledgement": acknowledgement,
+            "sections": [{
+                "id": "1", "number": "1.1", "title": "测试小节", "level": 2,
+                "gist": "测试主旨", "children": [], "target_chars": 500,
+                "min_chars": 475,
+                "paragraphs": [{"id": "p1", "text": "正" * 500}],
+            }],
+            "generating": False, "progress": 0, "done": 0, "total": 1,
+        })
+
+    def test_oneclick_generates_missing_en_abstract_and_acknowledgement(self):
+        self._save_complete_body_draft()
+        with mock.patch.object(self.service, "generate_section"), \
+             mock.patch.object(self.service, "generate_en_abstract", return_value="English abstract") as generate_en, \
+             mock.patch.object(self.service, "generate_acknowledgement", return_value="感谢") as generate_ack:
+            self.service.oneclick()
+        generate_en.assert_called_once_with(None)
+        generate_ack.assert_called_once_with(None)
+
+    def test_oneclick_preserves_existing_en_abstract_and_acknowledgement(self):
+        self._save_complete_body_draft(
+            abstract_en="Existing English abstract", acknowledgement="Existing acknowledgement"
+        )
+        with mock.patch.object(self.service, "generate_section"), \
+             mock.patch.object(self.service, "generate_en_abstract") as generate_en, \
+             mock.patch.object(self.service, "generate_acknowledgement") as generate_ack:
+            self.service.oneclick()
+        generate_en.assert_not_called()
+        generate_ack.assert_not_called()
 
 
 if __name__ == "__main__":

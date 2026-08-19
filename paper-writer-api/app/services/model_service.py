@@ -4,14 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import ipaddress
+import socket
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from app.config import settings
 from app.crypto_utils import decrypt_secret, encrypt_secret
 from app.db import get_conn
 from app.models.generate import GenerateRequest
-from app.models.model_config import ModelConfigCreate, ModelConfigUpdate
+from app.models.model_config import (
+    ModelConfigCreate,
+    ModelConfigUpdate,
+    ModelTestRequest,
+)
 from app.services import deepseek
 
 
@@ -42,17 +49,20 @@ def _decrypt(row: dict) -> dict:
     return row
 
 
-def _public(row: dict, include_key: bool = False) -> dict:
+def _public(row: dict) -> dict:
+    """Return a model configuration safe for every API response.
+
+    The plaintext key is only available through ``get_model`` for server-side
+    runtime resolution and connection testing; it must never cross the API
+    response boundary.
+    """
     row = dict(row)
     plain = decrypt_secret(row["api_key"])
     row["api_key_masked"] = mask_key(plain)
     row["has_api_key"] = bool(plain)
     row["is_default"] = bool(row["is_default"])
     row["enabled"] = bool(row["enabled"])
-    if include_key:
-        row["api_key"] = plain
-    else:
-        del row["api_key"]
+    del row["api_key"]
     return row
 
 
@@ -95,7 +105,7 @@ def create_model(data: ModelConfigCreate) -> dict:
              encrypt_secret(data.api_key), data.model,
              int(data.is_default), int(data.enabled), now, now),
         )
-    return _public(_get_raw(model_id), include_key=True)
+    return _public(_get_raw(model_id))
 
 
 def update_model(model_id: str, data: ModelConfigUpdate) -> dict | None:
@@ -146,6 +156,43 @@ def set_default(model_id: str) -> bool:
             "UPDATE model_configs SET is_default = 1, updated_at = ? "
             "WHERE id = ?", (_now(), model_id))
     return True
+
+
+def _validate_test_base_url(base_url: str) -> None:
+    """Allow model connection tests only to publicly routable HTTP(S) hosts."""
+    parsed = urlparse(base_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("模型测试 URL 必须是有效的 http 或 https 地址")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("模型测试 URL 不允许包含用户凭据")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("模型测试 URL 端口无效") from exc
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        raise ValueError("模型测试 URL 不允许访问本机或内网地址")
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(
+                hostname,
+                port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except socket.gaierror as exc:
+        raise ValueError("模型测试 URL 主机无法解析") from exc
+    if not addresses:
+        raise ValueError("模型测试 URL 主机无法解析")
+    for address in addresses:
+        try:
+            resolved_ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError("模型测试 URL 主机地址无效") from exc
+        if not resolved_ip.is_global:
+            raise ValueError("模型测试 URL 不允许访问本机或内网地址")
 
 
 def _to_runtime(cfg: dict) -> ModelRuntime:
@@ -207,8 +254,9 @@ def test_connection(payload: ModelTestRequest) -> dict:
         model = cfg["model"]
     if not (base_url and api_key and model):
         raise ValueError("缺少 base_url / api_key / model")
+    _validate_test_base_url(base_url)
     deepseek.chat_with(
         base_url=base_url, api_key=api_key, model=model,
         messages=[{"role": "user", "content": "ping"}],
-        max_tokens=1, timeout=180)
+        max_tokens=32, timeout=30)
     return {"ok": True, "message": "连接成功，模型可用"}

@@ -11,7 +11,6 @@ import {
   reviseParagraph,
   type AnalysisResult,
   type PaperPreview,
-  type PreviewImage,
   type VersionInfo,
 } from "../api/paper";
 import TemplateManagerModal from "../components/TemplateManagerModal";
@@ -58,7 +57,6 @@ export default function PreviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<LayoutMode>("reading");
-  const [zoomImage, setZoomImage] = useState<PreviewImage | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -321,7 +319,6 @@ export default function PreviewPage() {
       <section className="no-print mx-auto mt-4 grid max-w-6xl grid-cols-2 gap-2 px-4 sm:grid-cols-4">
         {[
           { label: "字数", value: `${m.word_count} 字`, sub: `目标 ${m.target_word_count} 字` },
-          { label: "图表", value: `${m.chart_count} 个`, sub: "" },
           { label: "参考文献", value: `${m.reference_count} 条`, sub: m.reference_style.toUpperCase() },
           { label: "格式检查", value: m.format_check, sub: "" },
         ].map((item) => (
@@ -536,30 +533,6 @@ export default function PreviewPage() {
                         />
                       );
                     }
-                    if (block.type === "figure") {
-                      return (
-                        <figure key={block.id} className="my-4 text-center">
-                          <img
-                            src={downloadUrl(taskId, block.path ?? "")}
-                            alt={block.number || block.title || "图表"}
-                            className="mx-auto h-auto max-w-full cursor-zoom-in rounded-lg border border-slate-200 shadow-sm"
-                            onClick={() =>
-                              setZoomImage({
-                                path: block.path ?? "",
-                                number: block.number ?? "",
-                                title: block.title ?? "",
-                              })
-                            }
-                          />
-                          {(block.number || block.title) && (
-                            <figcaption className="mt-1.5 text-sm text-slate-500">
-                              {block.number ? `${block.number} ` : ""}
-                              {block.title}
-                            </figcaption>
-                          )}
-                        </figure>
-                      );
-                    }
                     return (
                       <div key={block.id} className="group relative text-justify">
                         <p className="py-0.5">{block.text}</p>
@@ -664,37 +637,6 @@ export default function PreviewPage() {
         </div>
       )}
 
-      {/* 图片放大 */}
-      {zoomImage && (
-        <div
-          className="no-print fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-          onClick={() => setZoomImage(null)}
-        >
-          <div
-            className="max-h-full max-w-4xl overflow-auto rounded-xl bg-white p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <img
-              src={downloadUrl(taskId, zoomImage.path)}
-              alt={zoomImage.number || zoomImage.title}
-              className="max-h-[75vh] w-auto"
-            />
-            {(zoomImage.number || zoomImage.title) && (
-              <p className="mt-2 text-center text-sm text-slate-600">
-                {zoomImage.number ? `${zoomImage.number} ` : ""}
-                {zoomImage.title}
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={() => setZoomImage(null)}
-              className="mt-2 w-full rounded-lg bg-slate-100 py-1.5 text-sm text-slate-600 hover:bg-slate-200"
-            >
-              关闭
-            </button>
-          </div>
-        </div>
-      )}
 
       <TemplateManagerModal
         open={templateModalOpen}

@@ -7,6 +7,8 @@ from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import auth_middleware, parse_cors_origins
+
 from app.api.generate import router
 from app.api.history import router as history_router
 from app.api.revise import router as revise_router
@@ -63,12 +65,27 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+if settings.auth_required and not settings.auth_token.strip():
+    raise RuntimeError(
+        "PAPER_WRITER_AUTH_REQUIRED=true 时必须配置 PAPER_WRITER_AUTH_TOKEN。"
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=parse_cors_origins(settings.cors_origins),
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=False,
 )
+
+
+@app.middleware("http")
+async def api_authentication(request, call_next):
+    return await auth_middleware(
+        request, call_next,
+        required=settings.auth_required,
+        token=settings.auth_token,
+    )
 app.include_router(router)
 app.include_router(history_router)
 app.include_router(revise_router)

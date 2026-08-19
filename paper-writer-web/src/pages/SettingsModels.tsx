@@ -11,8 +11,12 @@ import {
   type ModelConfigInput,
 } from "../api/paper";
 
+const DOTS_API_BASE = "https://note3-prev-api.askdiandian.com";
+const DOTS_MODEL = "dots3-note-prev";
+
 const PROVIDERS = [
   "OpenAI Compatible",
+  "Dots.ai",
   "DeepSeek",
   "Anthropic",
   "Google",
@@ -55,7 +59,6 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
     type: "ok" | "err";
     text: string;
   } | null>(null);
-  const [oneTimeKey, setOneTimeKey] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -75,7 +78,6 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
   function openCreate() {
     setForm({ ...EMPTY_FORM });
     setShowKey(false);
-    setOneTimeKey(null);
   }
 
   function openEdit(model: ModelConfig) {
@@ -90,7 +92,6 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
       enabled: model.enabled,
     });
     setShowKey(false);
-    setOneTimeKey(null);
   }
 
   async function save() {
@@ -123,10 +124,7 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
         await updateModel(form.id, input);
         setMessage({ type: "ok", text: "模型已更新" });
       } else {
-        const created = await createModel(input);
-        if (created.api_key) {
-          setOneTimeKey(created.api_key);
-        }
+        await createModel(input);
         setMessage({ type: "ok", text: "模型已创建" });
       }
       setForm(null);
@@ -234,13 +232,6 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
             }`}
           >
             {message.text}
-          </div>
-        )}
-
-        {oneTimeKey && (
-          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-            新模型创建成功，API Key（仅此一次显示，请妥善保存）：
-            <code className="break-all">{oneTimeKey}</code>
           </div>
         )}
 
@@ -391,9 +382,19 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
                   <select
                     className={inputCls}
                     value={form.provider}
-                    onChange={(e) =>
-                      setForm({ ...form, provider: e.target.value })
-                    }
+                    onChange={(e) => {
+                      const provider = e.target.value;
+                      setForm({
+                        ...form,
+                        provider,
+                        base_url: provider === "Dots.ai" && !form.base_url.trim()
+                          ? DOTS_API_BASE
+                          : form.base_url,
+                        model: provider === "Dots.ai" && !form.model.trim()
+                          ? DOTS_MODEL
+                          : form.model,
+                      });
+                    }}
                   >
                     {PROVIDERS.map((p) => (
                       <option key={p} value={p}>
@@ -401,6 +402,11 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
                       </option>
                     ))}
                   </select>
+                  {form.provider === "Dots.ai" && (
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      Dots.ai：基础地址可填写官方地址，系统会自动补全 <code>/v1/chat/completions</code>，并使用 <code>api-key</code> 请求头。
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="mb-1 block text-sm text-slate-600">
@@ -412,7 +418,7 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
                     onChange={(e) =>
                       setForm({ ...form, base_url: e.target.value })
                     }
-                    placeholder="https://api.deepseek.com/v1"
+                    placeholder={form.provider === "Dots.ai" ? DOTS_API_BASE : "https://api.deepseek.com/v1"}
                   />
                 </div>
                 <div>
@@ -462,7 +468,7 @@ export default function SettingsModels({ embedded = false }: { embedded?: boolea
                     onChange={(e) =>
                       setForm({ ...form, model: e.target.value })
                     }
-                    placeholder="deepseek-chat / gpt-5 / llama3.1:8b"
+                    placeholder={form.provider === "Dots.ai" ? DOTS_MODEL : "deepseek-chat / gpt-5 / llama3.1:8b"}
                   />
                 </div>
                 <div className="flex items-center gap-6">

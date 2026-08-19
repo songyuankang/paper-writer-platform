@@ -1,11 +1,10 @@
-import {
+﻿import {
   BrowserRouter,
   Navigate,
   Route,
   Routes,
   useLocation,
 } from "react-router-dom";
-import Generate from "./pages/Generate";
 import HistoryPage from "./pages/History";
 import PreviewPage from "./pages/Preview";
 import SettingsModels from "./pages/SettingsModels";
@@ -17,6 +16,7 @@ import Templates from "./pages/Templates";
 import TopicPage from "./pages/create/TopicPage";
 import AbstractPage from "./pages/create/AbstractPage";
 import ReferencesPage from "./pages/create/ReferencesPage";
+import OutlineReviewPage from "./pages/create/OutlineReviewPage";
 import BodyPage from "./pages/create/BodyPage";
 
 function CreateIndexRedirect() {
@@ -39,11 +39,11 @@ export default function App() {
           <Route path="topic" element={<TopicPage />} />
           <Route path="abstract" element={<AbstractPage />} />
           <Route path="references" element={<ReferencesPage />} />
+          <Route path="outline" element={<OutlineReviewPage />} />
           <Route path="body" element={<BodyPage />} />
         </Route>
         <Route path="/polish" element={<Polish />} />
         <Route path="/templates" element={<Templates />} />
-        <Route path="/generate" element={<Generate />} />
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/settings/models" element={<SettingsModels />} />
         <Route path="/format/:taskId" element={<FormatPage />} />

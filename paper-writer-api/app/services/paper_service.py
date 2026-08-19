@@ -5,7 +5,6 @@ as the core engine: parse_template / build_docx / plot_chart / references.
 This service only wires the API request into the engine and collects outputs.
 """
 
-import json
 import logging
 import sys
 from contextlib import nullcontext
@@ -14,7 +13,7 @@ from pathlib import Path
 from app.config import Settings
 from app.models.generate import GenerateRequest
 from app.models.task import TaskStatus
-from app.services import chart_service
+from app.services import quality_service
 from app.services.content_generator import build_spec
 from app.services import history_service
 from app.services import deepseek, deepseek_service
@@ -47,9 +46,8 @@ class PaperService:
                 sys.path.insert(0, str(scripts))
             import build_docx  # noqa: F401
             import parse_template  # noqa: F401
-            import plot_chart  # noqa: F401
             import references  # noqa: F401
-            ENGINE["mods"] = (build_docx, parse_template, plot_chart, references)
+            ENGINE["mods"] = (build_docx, parse_template, references)
             logger.info("paper-writer engine loaded from %s", scripts)
         return ENGINE["mods"]
 
@@ -67,14 +65,18 @@ class PaperService:
             try:
                 from app.draft.service import DraftService
                 DraftService(task_id, task_dir, self.task_manager).build(
-                    req.model_dump(), model_id=req.model_id)
+                    req.model_dump(), model_id=req.model_id, require_confirmation=True)
+                files = self._list_outputs(task_dir)
                 self.task_manager.update(
-                    task_id, progress=5, status=TaskStatus.running,
-                    message="大纲草稿已生成，可在编辑器中逐段生成")
+                    task_id, progress=100, status=TaskStatus.completed,
+                    message="大纲草稿已生成，请确认大纲后进入正文编辑器",
+                    files=files)
                 history_service.update_record(
-                    task_id, status="running",
-                    error=None, completed=False)
-                logger.info("Task %s draft outline built", task_id)
+                    task_id, status="completed",
+                    error=None, completed=True)
+                history_service.update_record_progress(
+                    task_id, current_stage="completed", progress=100)
+                logger.info("Task %s draft outline built: %s", task_id, files)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Task %s draft build failed", task_id)
                 history_service.update_record(
@@ -111,36 +113,8 @@ class PaperService:
 
     def _run(self, task_id: str, req: GenerateRequest, task_dir: Path,
              template_path: Path | None) -> None:
-        build_docx, parse_template, plot_chart, references = self.engine()
+        build_docx, parse_template, references = self.engine()
         task_dir.mkdir(parents=True, exist_ok=True)
-
-        # 图表：新配置（chart_config）优先；否则兼容旧 chart_enabled 逻辑
-        charts = None
-        if req.chart_config is not None:
-            if req.chart_config.enabled:
-                self._step(task_id, 15, "生成图表")
-                charts = chart_service.generate_charts(
-                    task_dir, req.major, True,
-                    req.chart_config.count, req.chart_config.types)
-                logger.info("Generated %d chart(s)", len(charts))
-        elif req.chart_enabled:
-            self._step(task_id, 15, "生成示例图表")
-            figures = task_dir / "figures"
-            figures.mkdir(parents=True, exist_ok=True)
-            plot_chart.setup_fonts()
-            import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(figsize=(6.5, 3.5))
-            rows = [
-                {"年份": "2021", "指标": "120"},
-                {"年份": "2022", "指标": "168"},
-                {"年份": "2023", "指标": "205"},
-                {"年份": "2024", "指标": "246"},
-            ]
-            plot_chart.plot_line(fig, ax, rows, "年份", "指标",
-                                 xlabel="年份", ylabel="指标")
-            ax.set_title("示例数据变化趋势")
-            fig.tight_layout()
-            fig.savefig(figures / "fig1.png", dpi=200, bbox_inches="tight")
 
         # ===== 第一阶段：论文内容生成（只生成内容，不处理格式）=====
         spec = None
@@ -163,15 +137,15 @@ class PaperService:
                                          message="内容生成完成")
         else:
             self._step(task_id, 25, "生成内容 spec")
-            spec = build_spec(req, charts=charts)
-            charts = None  # 占位路径已在 build_spec 内注入图表
+            spec = build_spec(req)
 
         # ===== 第二阶段：格式处理（markdown/json → 交付物）=====
         # 不再立即生成最终 DOCX：用户点击「导出论文」时按所选模板渲染（见 /api/export）。
+        self._step(task_id, 75, "生成质量报告")
+        quality_service.write_quality_report(task_dir, req)
         self._step(task_id, 80, "格式处理")
         formatter_service.format_paper(
-            task_id, task_dir, req.model_dump(), spec, charts=charts,
-            build_docx=False)
+            task_id, task_dir, req.model_dump(), spec, build_docx=False)
         self._step(task_id, 95, "格式化完成")
 
     # -- helpers --------------------------------------------------------------

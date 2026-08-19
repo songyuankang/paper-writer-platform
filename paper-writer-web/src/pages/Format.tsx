@@ -26,8 +26,6 @@ interface Settings {
   reference_style: string;
   auto_sort: boolean;
   auto_number: boolean;
-  chart_numbering: string;
-  chart_position: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -38,8 +36,6 @@ const DEFAULT_SETTINGS: Settings = {
   reference_style: "gb7714",
   auto_sort: true,
   auto_number: true,
-  chart_numbering: "chapter",
-  chart_position: "auto",
 };
 
 function Switch({
@@ -199,7 +195,7 @@ export default function FormatPage() {
           <div>
             <h1 className="text-2xl font-bold text-slate-800">论文格式处理</h1>
             <p className="mt-1 text-sm text-slate-500">
-              内容生成已完成，本页面负责排版、目录、参考文献、图表与导出
+              内容生成已完成，本页面负责排版、目录、参考文献与导出
             </p>
           </div>
           <Link
@@ -367,21 +363,6 @@ export default function FormatPage() {
             </div>
           </section>
 
-          {/* 5. 图表设置 */}
-          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <h2 className="mb-3 font-semibold text-slate-700">5. 图表设置</h2>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <Switch label="图表编号（图1-1 / 图1-2）" checked
-                      onChange={() => undefined} />
-              <Switch label="图表位置自动调整" checked={settings.chart_position === "auto"}
-                      onChange={(v) =>
-                        setSettings({
-                          ...settings,
-                          chart_position: v ? "auto" : "manual",
-                        })
-                      } />
-            </div>
-          </section>
 
           {/* 6. 生成 */}
           <button

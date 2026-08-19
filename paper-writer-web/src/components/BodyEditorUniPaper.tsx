@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import EditorModalShell from "./EditorModalShell";
+import EditableDraftBlock from "./EditableDraftBlock";
 import OneClickConfirmModal from "./OneClickConfirmModal";
 import HistoryPage from "../pages/History";
 import SettingsModels from "../pages/SettingsModels";
 import {
   addDraftParagraph,
+  updateDraftBlock,
+  addDraftTable,
+  createDraftInsight,
+  regenerateDraftChart,
+  updateDraftChart,
   deleteDraftParagraph,
   startDraftOneclick,
   downloadUrl,
@@ -254,6 +260,48 @@ export default function BodyEditorUniPaper({
     } catch {
       /* 忽略 */
     }
+  }
+
+  async function addTableBlock(sectionId: string) {
+    try { await addDraftTable(taskId, sectionId); await refresh(); } catch (err) { setError(err instanceof Error ? err.message : "新增表格失败"); }
+  }
+
+  async function createInsight(sectionId: string) {
+    setError(null);
+    try {
+      await createDraftInsight(taskId, sectionId, {
+        scope: "full_paper",
+        intent: "auto",
+        placement: "section_end",
+      });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "总结生成失败");
+    }
+  }
+
+  async function patchChart(blockId: string, patch: { title?: string; caption?: string; display_scale?: number }) {
+    setError(null);
+    try {
+      await updateDraftChart(taskId, blockId, patch);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "修改图表失败");
+    }
+  }
+
+  async function regenerateChart(blockId: string) {
+    setError(null);
+    try {
+      await regenerateDraftChart(taskId, blockId, { illustrative: true });
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重新生成图表失败");
+    }
+  }
+
+  async function patchContentBlock(blockId: string, patch: { text?: string; title?: string; headers?: string[]; rows?: string[][] }) {
+    try { await updateDraftBlock(taskId, blockId, patch); await refresh(); } catch (err) { setError(err instanceof Error ? err.message : "修改内容块失败"); }
   }
 
   async function addPara(sectionId: string) {
@@ -769,6 +817,11 @@ export default function BodyEditorUniPaper({
                           onPatch={(patch) => void patchSection(child.id, patch)}
                           onGenerate={() => void handleGenerateSection(child)}
                           onAdd={() => void addPara(child.id)}
+                          onAddTable={() => void addTableBlock(child.id)}
+          onCreateInsight={() => void createInsight(child.id)}
+          onChartUpdate={(id, patch) => void patchChart(id, patch)}
+          onRegenerateChart={(id) => void regenerateChart(id)}
+                          onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
                           onPatchPara={patchParagraph}
                           onDel={delPara}
                           onMove={movePara}
@@ -788,6 +841,11 @@ export default function BodyEditorUniPaper({
                             onPatch={(patch) => void patchSection(g.id, patch)}
                             onGenerate={() => void handleGenerateSection(g)}
                             onAdd={() => void addPara(g.id)}
+                          onAddTable={() => void addTableBlock(g.id)}
+                            onCreateInsight={() => void createInsight(g.id)}
+                            onChartUpdate={(id, patch) => void patchChart(id, patch)}
+                            onRegenerateChart={(id) => void regenerateChart(id)}
+                          onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
                             onPatchPara={patchParagraph}
                             onDel={delPara}
                             onMove={movePara}
@@ -1015,7 +1073,12 @@ function LeafSection({
   onPatch,
   onGenerate,
   onAdd,
+  onAddTable,
+  onCreateInsight,
+  onChartUpdate,
+  onRegenerateChart,
   onPatchPara,
+  onPatchBlock,
   onDel,
   onMove,
 }: {
@@ -1024,7 +1087,12 @@ function LeafSection({
   onPatch: (patch: { title?: string; gist?: string }) => void;
   onGenerate: () => void;
   onAdd: () => void;
+  onAddTable: () => void;
+  onCreateInsight: () => void;
+  onChartUpdate: (id: string, patch: { title?: string; caption?: string; display_scale?: number }) => void;
+  onRegenerateChart: (id: string) => void;
   onPatchPara: (pid: string, text: string) => void;
+  onPatchBlock: (id: string, patch: { text?: string; title?: string; headers?: string[]; rows?: string[][] }) => void;
   onDel: (pid: string) => void;
   onMove: (pid: string, dir: "up" | "down") => void;
 }) {
@@ -1048,41 +1116,19 @@ function LeafSection({
       )}
       <div className="space-y-4">
         {section.paragraphs.map((p, i) => (
-          <div key={p.id} className="group">
-            <AutoGrowTextarea
-              value={p.text}
-              onChange={(e) => onPatchPara(p.id, e.target.value)}
-              className={paraCls}
-            />
-            <div className="mt-1.5 flex items-center justify-between">
-              <span className="text-xs text-neutral-400">段落 {i + 1}</span>
-              <div className="flex items-center gap-1 text-xs">
-                <button
-                  type="button"
-                  onClick={() => onMove(p.id, "up")}
-                  disabled={i === 0}
-                  className="rounded border border-neutral-200 px-2 py-0.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-40"
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onMove(p.id, "down")}
-                  disabled={i === section.paragraphs.length - 1}
-                  className="rounded border border-neutral-200 px-2 py-0.5 text-neutral-500 hover:bg-neutral-100 disabled:opacity-40"
-                >
-                  ↓
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDel(p.id)}
-                  className="rounded border border-red-200 px-2 py-0.5 text-red-500 hover:bg-red-50"
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-          </div>
+          <EditableDraftBlock
+            key={p.id}
+            block={p}
+            index={i}
+            onText={(text) => onPatchPara(p.id, text)}
+            onUpdate={(patch) => onPatchBlock(p.id, patch)}
+            onChartUpdate={(patch) => onChartUpdate(p.id, patch)}
+            onRegenerateChart={() => onRegenerateChart(p.id)}
+            onDelete={() => onDel(p.id)}
+            onMove={(direction) => onMove(p.id, direction)}
+            canMoveUp={i > 0}
+            canMoveDown={i < section.paragraphs.length - 1}
+          />
         ))}
       </div>
       <div className="mt-2 flex items-center gap-2">
@@ -1097,6 +1143,8 @@ function LeafSection({
         <button type="button" onClick={onAdd} className={BTN_GHOST}>
           + 新增段落
         </button>
+        <button type="button" onClick={onAddTable} className={BTN_GHOST}>+ 新增表格</button>
+        <button type="button" onClick={onCreateInsight} className={BTN_GHOST}>+ 总结生成</button>
       </div>
     </div>
   );

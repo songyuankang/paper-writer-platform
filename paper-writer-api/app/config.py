@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "INFO"
+    # API protection is opt-in to preserve the current local workflow.
+    auth_required: bool = False
+    auth_token: str = ""
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     project_root: Path = Path(__file__).resolve().parent.parent
     upload_dir: Path = Path(__file__).resolve().parent.parent / "uploads"

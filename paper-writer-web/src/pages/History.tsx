@@ -132,13 +132,9 @@ export default function HistoryPage({
         major: String(p.major ?? record.major),
         paper_type: String(p.paper_type ?? record.paper_type),
         word_count: Number(p.word_count ?? record.word_count),
-        chart_enabled: Boolean(p.chart_enabled),
         reference_style: String(p.reference_style ?? "gb7714"),
         generation_mode: p.generation_mode === "outline" ? "outline" : undefined,
         outline: p.outline ? String(p.outline) : undefined,
-        chart_config: p.chart_config
-          ? (p.chart_config as { enabled: boolean; count: number; types: string[] })
-          : null,
         special_requirements: p.special_requirements
           ? String(p.special_requirements)
           : undefined,

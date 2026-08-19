@@ -222,7 +222,7 @@ def _apply_parsed_styles(blocks: list[dict], styles, default_font: dict) -> None
 
 def _apply_parsed_toc(blocks: list[dict], toc_cfg) -> None:
     """把解析出的目录信息（检测到 TOC 域）写入 toc block。"""
-    detected = bool(toc_cfg.get("detected")) if isinstance(toc_cfg, dict) else False
+
     for b in blocks:
         if b.get("key") == "toc":
             b["enabled"] = True

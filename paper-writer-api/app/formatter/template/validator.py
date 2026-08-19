@@ -189,7 +189,7 @@ class TemplateValidator:
                            "footer", "numbering", "blocks"):
                 result.issues.append(ValidationIssue(
                     path=f"$.{key}", code="unknown_field",
-                    message=f"未知顶层字段，将原样保留到 extra",
+                    message="未知顶层字段，将原样保留到 extra",
                     severity=SEVERITY_INFO))
 
         self._validate_schema_version(content, result)

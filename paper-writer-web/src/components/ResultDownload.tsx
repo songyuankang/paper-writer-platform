@@ -11,10 +11,6 @@ export default function ResultDownload({ taskId, files }: ResultDownloadProps) {
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const hasReview = files.includes("格式意见整理.md");
-  const figure =
-    files.find((f) => f.startsWith("charts/figure_")) ??
-    files.find((f) => f.startsWith("figures/"));
-  const hasChartData = files.includes("charts/chart_data.json");
 
   const links: { label: string; href: string; desc: string }[] = [];
   if (hasReview) {
@@ -24,24 +20,10 @@ export default function ResultDownload({ taskId, files }: ResultDownloadProps) {
       desc: "格式检查与修改建议",
     });
   }
-  if (figure) {
-    links.push({
-      label: "图表文件",
-      href: downloadUrl(taskId, figure),
-      desc: "数据图表 PNG",
-    });
-  }
-  if (hasChartData) {
-    links.push({
-      label: "图表数据",
-      href: downloadUrl(taskId, "charts/chart_data.json"),
-      desc: "chart_data.json",
-    });
-  }
   links.push({
     label: "全部下载（ZIP）",
     href: downloadUrl(taskId),
-    desc: "内容 + 图表 + 检查报告",
+    desc: "内容与检查报告",
   });
 
   /** 导出：选择排版模板 → 后端按模板渲染 docx → 下载。 */

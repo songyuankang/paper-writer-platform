@@ -6,7 +6,6 @@ from pathlib import Path
 
 from docx import Document
 
-from app.config import settings
 from app.formatter.style import engine
 
 

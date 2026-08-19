@@ -22,6 +22,17 @@ MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_FILES = 5
 PER_FILE_TEXT_CHARS = 6000  # 单文件最多注入的文本字符数
 TOTAL_TEXT_CHARS = 30000  # 全部资料合计最多注入的字符数
+MATERIAL_KINDS = frozenset({"开题报告", "仿写论文", "其他资料"})
+DEFAULT_MATERIAL_KIND = "其他资料"
+
+
+def normalize_kind(value: object) -> str:
+    """Return a known display category before it is ever used in a path."""
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate in MATERIAL_KINDS:
+            return candidate
+    return DEFAULT_MATERIAL_KIND
 
 
 def is_supported(filename: str) -> bool:
@@ -100,6 +111,7 @@ def save_and_extract(files: list[UploadFile],
 
     materials_dir = task_dir / "materials"
     materials_dir.mkdir(parents=True, exist_ok=True)
+    materials_root = materials_dir.resolve()
 
     result: list[dict] = []
     total_chars = 0
@@ -116,9 +128,13 @@ def save_and_extract(files: list[UploadFile],
         if len(data) > MAX_FILE_SIZE:
             raise ValueError(f"文件「{filename}」超过 5MB 大小限制")
 
-        kind = (kinds[i] if kinds and i < len(kinds) and kinds[i].strip()
-                else "其他资料")
-        kind_dir = materials_dir / kind
+        raw_kind = kinds[i] if kinds and i < len(kinds) else None
+        kind = normalize_kind(raw_kind)
+        kind_dir = (materials_root / kind).resolve()
+        try:
+            kind_dir.relative_to(materials_root)
+        except ValueError as exc:
+            raise ValueError("资料类别目录无效") from exc
         kind_dir.mkdir(parents=True, exist_ok=True)
         target = kind_dir / filename
         # 同名文件去重

@@ -15,7 +15,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.config import settings
 from app.db import get_conn
 from app.formatter.style import engine
 
