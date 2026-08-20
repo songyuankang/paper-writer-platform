@@ -22,6 +22,7 @@ import VisualizationLab from "./pages/VisualizationLab";
 import ResearchData from "./pages/ResearchData";
 import ResearchAnalysis from "./pages/ResearchAnalysis";
 import ResearchAssistant from "./pages/ResearchAssistant";
+import ResearchResults from "./pages/ResearchResults";
 
 function CreateIndexRedirect() {
   const location = useLocation();
@@ -56,6 +57,7 @@ export default function App() {
         <Route path="/research/data" element={<ResearchData />} />
         <Route path="/research/analysis" element={<ResearchAnalysis />} />
         <Route path="/research/assistant" element={<ResearchAssistant />} />
+        <Route path="/research/results" element={<ResearchResults />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

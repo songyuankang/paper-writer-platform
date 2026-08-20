@@ -20,9 +20,10 @@ from pathlib import Path
 from app.config import Settings, settings
 
 from app.draft import outline as outline_mod
-from app.draft.chart_runtime import recompute_chart_block, walk_sections
+from app.draft.chart_runtime import now, recompute_chart_block, walk_sections
 from app.services.research_object_service import renumber_document_references
 from app.services.cross_reference_service import CrossReferenceService
+from app.services.dependency_graph_service import DependencyGraphService
 
 from app.formatter import service as formatter_service
 from app.models.task import TaskStatus
@@ -931,6 +932,15 @@ class DraftService:
         # Text in structured references is resolved from target_object_id after
         # renumbering; cached labels are never treated as DOCX source-of-truth.
         cross_reference_text = CrossReferenceService(storage_settings).render_draft_text(self.task_id, draft)
+        # Phase 6C remains read-only: export records stale-source warnings but
+        # never silently reruns analyses, changes results or rewrites findings.
+        impact_warnings = (
+            DependencyGraphService(storage_settings).export_warnings(self.task_id)
+            if self.task_dir == storage_settings.output_dir / self.task_id else []
+        )
+        if impact_warnings:
+            draft["export_warnings"] = {"generated_at": now(), "warnings": impact_warnings}
+            self.save(draft)
 
         spec_sections: list[dict] = []
 
