@@ -1616,3 +1616,27 @@ export async function runResearchAssistantRecommendation(input: { task_id: strin
   if (!res.ok) throw await toError(res);
   return res.json();
 }
+
+export interface ResearchExplanation {
+  id: string;
+  analysis_id: string;
+  analysis_result_id: string;
+  dataset_id: string;
+  dataset_version: number;
+  dataset_version_id: string;
+  data_fingerprint: string;
+  model_id: string | null;
+  provider: "configured_model" | "rule_based_fallback";
+  analysis_summary: string;
+  statistical_facts: Array<{ text: string; source: "analysis_result" }>;
+  interpretation: string[];
+  limitations: string[];
+  cautions: string[];
+  created_at: string;
+}
+
+export async function explainAnalysisResult(input: { analysis_id: string; analysis_result_id: string; model_id?: string }): Promise<ResearchExplanation> {
+  const res = await apiFetch(`${API_BASE}/api/research-assistant/explain`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
