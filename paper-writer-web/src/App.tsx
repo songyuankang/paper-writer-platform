@@ -23,6 +23,7 @@ import ResearchData from "./pages/ResearchData";
 import ResearchAnalysis from "./pages/ResearchAnalysis";
 import ResearchAssistant from "./pages/ResearchAssistant";
 import ResearchResults from "./pages/ResearchResults";
+import ResearchDiscussion from "./pages/ResearchDiscussion";
 
 function CreateIndexRedirect() {
   const location = useLocation();
@@ -58,6 +59,7 @@ export default function App() {
         <Route path="/research/analysis" element={<ResearchAnalysis />} />
         <Route path="/research/assistant" element={<ResearchAssistant />} />
         <Route path="/research/results" element={<ResearchResults />} />
+        <Route path="/research/discussion" element={<ResearchDiscussion />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

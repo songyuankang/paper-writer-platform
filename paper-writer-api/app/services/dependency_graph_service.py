@@ -114,6 +114,42 @@ class DependencyGraphService:
                 continue
         return records
 
+    def _read_hypotheses(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "hypotheses" / "items"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("hp_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _read_evaluations(self, hypothesis_ids: set[str]) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "hypotheses" / "evaluations"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("hp_*/he_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("hypothesis_id") in hypothesis_ids:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _read_frameworks(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "discussion_frameworks"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("df_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
     @staticmethod
     def _block_type(block: dict[str, Any]) -> str | None:
         if block.get("type") == "table":
@@ -129,8 +165,14 @@ class DependencyGraphService:
         speculative link and never rewrites the underlying research artifact.
         """
         task_id = _safe_task(task_id)
-        self.objects.renumber_document_references(task_id)
-        self.objects.sync(task_id)
+        # A task may start with Dataset/Analysis/Hypothesis before a paper draft
+        # exists.  Graph rebuild remains useful in that state and simply omits
+        # draft-owned Table/Figure/CrossReference nodes.
+        try:
+            self.objects.renumber_document_references(task_id)
+            self.objects.sync(task_id)
+        except ValueError:
+            pass
         links: list[dict[str, Any]] = []
         analyses = [self.analyses.get(item["id"]) for item in self.analyses.list(task_id=task_id)]
         results: dict[str, dict[str, Any]] = {}
@@ -169,8 +211,12 @@ class DependencyGraphService:
             if explanation_id:
                 links.append(self._link(task_id, "explanation", explanation_id, "finding", finding["id"], "explains", finding.get("dataset_version")))
 
-        object_index = {item["id"]: item for item in self.objects.list(task_id)}
-        for reference in self.references.list(task_id):
+        try:
+            object_index = {item["id"]: item for item in self.objects.list(task_id)}
+            references = self.references.list(task_id)
+        except ValueError:
+            object_index, references = {}, []
+        for reference in references:
             target = object_index.get(str(reference.get("target_object_id") or ""))
             if target and target.get("source_id") in block_by_object:
                 source = block_by_object[target["source_id"]]
@@ -178,6 +224,22 @@ class DependencyGraphService:
             for finding in findings:
                 if str(reference.get("target_object_id") or "") in {str(value) for value in finding.get("research_object_ids") or []}:
                     links.append(self._link(task_id, "finding", finding["id"], "cross_reference", reference["id"], "references"))
+
+        # Phase 7A nodes intentionally reuse this graph.  They retain only IDs
+        # and provenance links; their factual evidence remains in AnalysisResult.
+        hypotheses = self._read_hypotheses(task_id)
+        evaluations = self._read_evaluations({str(item.get("id")) for item in hypotheses})
+        for hypothesis in hypotheses:
+            for analysis_id in hypothesis.get("analysis_ids") or []:
+                links.append(self._link(task_id, "analysis", str(analysis_id), "hypothesis", hypothesis["id"], "references"))
+        for evaluation in evaluations:
+            links.append(self._link(task_id, "hypothesis", evaluation["hypothesis_id"], "hypothesis_evaluation", evaluation["id"], "derived_from", evaluation.get("dataset_version")))
+            links.append(self._link(task_id, "analysis_result", evaluation["analysis_result_id"], "hypothesis_evaluation", evaluation["id"], "derived_from", evaluation.get("dataset_version")))
+        for framework in self._read_frameworks(task_id):
+            for evaluation_id in framework.get("evaluation_ids") or []:
+                links.append(self._link(task_id, "hypothesis_evaluation", str(evaluation_id), "discussion_framework", framework["id"], "explains"))
+            for finding_id in framework.get("finding_ids") or []:
+                links.append(self._link(task_id, "finding", str(finding_id), "discussion_framework", framework["id"], "explains"))
 
         # Deterministic de-duplication makes repeated lazy rebuilds idempotent.
         unique = {item["id"]: item for item in links}
@@ -211,6 +273,9 @@ class DependencyGraphService:
         results = {item["id"]: item for analysis_id in analyses for item in self._read_result_records(analysis_id)}
         explanations = {item["id"]: item for analysis_id in analyses for item in self._read_explanations(analysis_id)}
         findings = {item["id"]: item for item in self._read_findings(task_id)}
+        hypotheses = {item["id"]: item for item in self._read_hypotheses(task_id)}
+        evaluations = {item["id"]: item for item in self._read_evaluations(set(hypotheses))}
+        frameworks = {item["id"]: item for item in self._read_frameworks(task_id)}
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for dataset in self.datasets.list_datasets(task_id):
             try:
@@ -224,6 +289,13 @@ class DependencyGraphService:
         for item in results.values(): records[("analysis_result", item["id"])] = item
         for item in explanations.values(): records[("explanation", item["id"])] = item
         for item in findings.values(): records[("finding", item["id"])] = item
+        for item in hypotheses.values(): records[("hypothesis", item["id"])] = item
+        for item in evaluations.values(): records[("hypothesis_evaluation", item["id"])] = item
+        for item in frameworks.values():
+            record = dict(item)
+            if any(evaluations.get(str(evaluation_id), {}).get("dataset_version") and self._latest_version(str(evaluations[str(evaluation_id)].get("dataset_id"))) and int(evaluations[str(evaluation_id)].get("dataset_version")) < int(self._latest_version(str(evaluations[str(evaluation_id)].get("dataset_id"))) or 0) for evaluation_id in item.get("evaluation_ids") or []):
+                record["status"] = "stale_source"
+            records[("discussion_framework", item["id"])] = record
         draft = self._load_draft(task_id)
         for section in walk_sections(draft.get("sections") or []):
             for block in section.get("paragraphs") or []:
@@ -231,7 +303,11 @@ class DependencyGraphService:
                 if kind and block.get("id"):
                     record = dict(block); record["dataset_id"] = (block.get("analysis") or {}).get("dataset_id"); record["dataset_version"] = (block.get("analysis") or {}).get("dataset_version"); record["data_fingerprint"] = (block.get("analysis") or {}).get("data_fingerprint")
                     records[(kind, str(block["id"]))] = record
-        for item in self.references.list(task_id):
+        try:
+            references = self.references.list(task_id)
+        except ValueError:
+            references = []
+        for item in references:
             records[("cross_reference", item["id"])] = item
         return records, results, explanations, findings
 
