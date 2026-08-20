@@ -19,7 +19,7 @@ from app.draft.chart_runtime import walk_sections
 from app.services.analysis_service import AnalysisService
 from app.services.dataset_service import DatasetService
 
-SUPPORTED_TYPES = {"dataset", "analysis", "table", "figure", "finding"}
+SUPPORTED_TYPES = {"dataset", "analysis", "table", "figure", "finding", "literature"}
 
 
 def _now() -> str:
@@ -157,6 +157,22 @@ class ResearchObjectService:
                     "number": None, "status": finding.get("status") or "draft",
                     "created_at": finding.get("created_at"), "updated_at": finding.get("updated_at") or finding.get("created_at"),
                 })
+        literature_root = self.settings.db_path.parent / "literature" / "items"
+        for path in literature_root.glob("lit_*.json") if literature_root.exists() else []:
+            try:
+                literature = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if literature.get("task_id") != task_id or literature.get("status") == "deleted":
+                continue
+            source_id = _clean(literature.get("id"), 120)
+            if source_id:
+                records.append({
+                    "type": "literature", "source_id": source_id,
+                    "title": _clean(literature.get("title")) or "学术文献",
+                    "number": None, "status": "metadata_updated" if literature.get("metadata_updated") else "ready",
+                    "created_at": literature.get("created_at"), "updated_at": literature.get("updated_at"),
+                })
         return records
 
     def sync(self, task_id: str, draft: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -285,7 +301,7 @@ class ResearchObjectService:
         return sorted(result, key=lambda item: (item.get("updated_at") or "", item["id"]), reverse=True)
 
     def get(self, object_id: str) -> dict[str, Any]:
-        if not re.fullmatch(r"ro_(?:dataset|analysis|table|figure|finding)_[a-f0-9]{24}", object_id):
+        if not re.fullmatch(r"ro_(?:dataset|analysis|table|figure|finding|literature)_[a-f0-9]{24}", object_id):
             raise ValueError("ResearchObject ID 无效")
         for directory in self.root.iterdir() if self.root.exists() else []:
             if not directory.is_dir():

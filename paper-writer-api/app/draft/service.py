@@ -24,6 +24,7 @@ from app.draft.chart_runtime import now, recompute_chart_block, walk_sections
 from app.services.research_object_service import renumber_document_references
 from app.services.cross_reference_service import CrossReferenceService
 from app.services.dependency_graph_service import DependencyGraphService
+from app.services.literature_service import LiteratureService
 
 from app.formatter import service as formatter_service
 from app.models.task import TaskStatus
@@ -932,6 +933,8 @@ class DraftService:
         # Text in structured references is resolved from target_object_id after
         # renumbering; cached labels are never treated as DOCX source-of-truth.
         cross_reference_text = CrossReferenceService(storage_settings).render_draft_text(self.task_id, draft)
+        literature_service = LiteratureService(storage_settings)
+        literature_citation_text = literature_service.render_draft_text(self.task_id, draft)
         # Phase 6C remains read-only: export records stale-source warnings but
         # never silently reruns analyses, changes results or rewrites findings.
         impact_warnings = (
@@ -951,6 +954,11 @@ class DraftService:
 
                 # Structured draft block export: editor and Word share the same stored block.
                 kind = p.get("type", "paragraph")
+                if kind == "literature_citation":
+                    text = literature_citation_text.get(str(p.get("id")), str(p.get("text") or "")).strip()
+                    if text:
+                        spec_sections.append({"type": "p", "text": text})
+                    continue
                 if kind == "cross_reference" or isinstance(p.get("content"), list):
                     text = cross_reference_text.get(str(p.get("id")), str(p.get("text") or "")).strip()
                     if text:
@@ -1056,7 +1064,17 @@ class DraftService:
         if (draft.get("acknowledgement") or "").strip():
             spec_sections.append({"type": "h1", "text": "致谢"})
             spec_sections.append({"type": "p", "text": draft["acknowledgement"]})
-        refs = draft.get("references") or []
+        refs = list(draft.get("references") or [])
+        # Citation truth remains literature_id.  Only currently resolvable citations
+        # contribute a minimal bibliography line; deleted Literature stays visible as
+        # a broken in-text marker rather than being silently removed or invented.
+        for literature in literature_service.reference_records(self.task_id):
+            author_text = ", ".join(str(item) for item in literature.get("authors") or []) or "匿名"
+            year = literature.get("year") or "n.d."
+            doi = str(literature.get("doi") or "")
+            line = f"{author_text}. {literature.get('title') or '未命名文献'}. {year}." + (f" DOI: {doi}" if doi else "")
+            if line not in refs:
+                refs.append(line)
         spec_sections.append({"type": "references", "items": refs})
 
         spec = {

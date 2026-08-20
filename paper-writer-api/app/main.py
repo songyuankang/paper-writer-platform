@@ -26,6 +26,7 @@ from app.api.research_objects import router as research_objects_router
 from app.api.cross_references import router as cross_references_router
 from app.api.research_impact import router as research_impact_router
 from app.api.hypotheses import router as hypotheses_router
+from app.api.literature import router as literature_router
 
 from app.config import settings
 from app.db import init_db
@@ -113,6 +114,7 @@ app.include_router(research_objects_router)
 app.include_router(cross_references_router)
 app.include_router(research_impact_router)
 app.include_router(hypotheses_router)
+app.include_router(literature_router)
 
 
 if __name__ == "__main__":

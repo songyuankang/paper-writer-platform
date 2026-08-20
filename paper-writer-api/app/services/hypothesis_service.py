@@ -272,7 +272,24 @@ class HypothesisService:
             decision = evaluation["decision"] if evaluation else "inconclusive"
             summaries.append({"hypothesis_id": hypothesis["id"], "statement": hypothesis["statement"], "decision": decision, "evaluation_id": evaluation["id"] if evaluation else None, "evidence": evaluation.get("evidence") if evaluation else None})
         sections = {"main_findings": [{"type": "evidence_card", "hypothesis_id": item["hypothesis_id"], "decision": item["decision"], "statement": item["statement"]} for item in summaries], "hypothesis_evaluation": summaries, "interpretation": ["请结合研究设计、样本范围与已验证统计证据讨论可能解释；本框架不作因果推断。"], "limitations": ["需要结合样本、测量、模型前提与未观测因素补充限制讨论。"], "practical_implications": ["需要由作者基于研究情境补充实践含义；系统不会自动引用文献或生成完整 Discussion。"]}
-        framework = {"id": f"df_{uuid.uuid4().hex[:16]}", "task_id": task_id, "hypothesis_ids": [item["id"] for item in hypotheses], "finding_ids": list(dict.fromkeys(finding_ids or [])), "evaluation_ids": [item["id"] for item in selected], "sections": sections, "provider": "controlled_evidence_framework", "status": "current", "created_at": _now()}
+        # External evidence is selected only from user-created Hypothesis-Literature
+        # links.  Framework creation never asks a model to infer a literature claim.
+        link_path = self.settings.db_path.parent / "literature" / "hypothesis_links" / f"{task_id}.json"
+        try:
+            literature_links = (json.loads(link_path.read_text(encoding="utf-8")) or {}).get("links") or [] if link_path.is_file() else []
+        except json.JSONDecodeError:
+            literature_links = []
+        linked_literature = {str(item.get("literature_id")) for item in literature_links if str(item.get("hypothesis_id")) in {item["id"] for item in hypotheses}}
+        evidence_root = self.settings.db_path.parent / "literature" / "evidence"
+        literature_evidence_ids: list[str] = []
+        for path in evidence_root.glob("lit_*/le_*.json") if evidence_root.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if str(item.get("literature_id")) in linked_literature and item.get("id"):
+                    literature_evidence_ids.append(str(item["id"]))
+            except json.JSONDecodeError:
+                continue
+        framework = {"id": f"df_{uuid.uuid4().hex[:16]}", "task_id": task_id, "hypothesis_ids": [item["id"] for item in hypotheses], "finding_ids": list(dict.fromkeys(finding_ids or [])), "evaluation_ids": [item["id"] for item in selected], "literature_evidence_ids": sorted(set(literature_evidence_ids)), "sections": sections, "provider": "controlled_evidence_framework", "status": "current", "created_at": _now()}
         if any(item["data_status"] != "current" for item in selected): framework["status"] = "stale_source"
         self._save(self._framework_path(framework["id"]), framework)
         return framework

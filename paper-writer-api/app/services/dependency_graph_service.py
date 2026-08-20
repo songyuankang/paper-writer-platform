@@ -138,6 +138,40 @@ class DependencyGraphService:
                 continue
         return records
 
+    def _read_literature(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "literature" / "items"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("lit_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _read_literature_links(self, task_id: str) -> list[dict[str, Any]]:
+        path = self.settings.db_path.parent / "literature" / "hypothesis_links" / f"{task_id}.json"
+        if not path.is_file(): return []
+        try: return (json.loads(path.read_text(encoding="utf-8")) or {}).get("links") or []
+        except json.JSONDecodeError: return []
+
+    def _read_literature_evidence(self, literature_ids: set[str]) -> list[dict[str, Any]]:
+        root = self.settings.db_path.parent / "literature" / "evidence"; records: list[dict[str, Any]] = []
+        for path in root.glob("lit_*/le_*.json") if root.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("literature_id") in literature_ids: records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _read_citations(self, task_id: str) -> list[dict[str, Any]]:
+        path = self.settings.db_path.parent / "literature" / "citations" / f"{task_id}.json"
+        if not path.is_file(): return []
+        try: return (json.loads(path.read_text(encoding="utf-8")) or {}).get("citations") or []
+        except json.JSONDecodeError: return []
+
     def _read_frameworks(self, task_id: str) -> list[dict[str, Any]]:
         directory = self.settings.db_path.parent / "discussion_frameworks"
         records: list[dict[str, Any]] = []
@@ -241,6 +275,24 @@ class DependencyGraphService:
             for finding_id in framework.get("finding_ids") or []:
                 links.append(self._link(task_id, "finding", str(finding_id), "discussion_framework", framework["id"], "explains"))
 
+        literature = self._read_literature(task_id)
+        literature_ids = {str(item.get("id")) for item in literature}
+        literature_evidence = self._read_literature_evidence(literature_ids)
+        for link in self._read_literature_links(task_id):
+            if link.get("hypothesis_id") and link.get("literature_id"):
+                links.append(self._link(task_id, "hypothesis", str(link["hypothesis_id"]), "literature", str(link["literature_id"]), "references"))
+        for evidence in literature_evidence:
+            links.append(self._link(task_id, "literature", str(evidence["literature_id"]), "literature_evidence", str(evidence["id"]), "derived_from"))
+        for framework in self._read_frameworks(task_id):
+            framework_hypotheses = {str(item) for item in framework.get("hypothesis_ids") or []}
+            linked_literature = {str(item.get("literature_id")) for item in self._read_literature_links(task_id) if str(item.get("hypothesis_id")) in framework_hypotheses}
+            for evidence in literature_evidence:
+                if str(evidence.get("literature_id")) in linked_literature:
+                    links.append(self._link(task_id, "discussion_framework", framework["id"], "literature_evidence", str(evidence["id"]), "explains"))
+        for citation in self._read_citations(task_id):
+            if citation.get("literature_id"):
+                links.append(self._link(task_id, "citation", str(citation["id"]), "literature", str(citation["literature_id"]), "references"))
+
         # Deterministic de-duplication makes repeated lazy rebuilds idempotent.
         unique = {item["id"]: item for item in links}
         ordered = sorted(unique.values(), key=lambda item: (item["source_type"], item["source_id"], item["target_type"], item["target_id"], item["relation"]))
@@ -276,6 +328,9 @@ class DependencyGraphService:
         hypotheses = {item["id"]: item for item in self._read_hypotheses(task_id)}
         evaluations = {item["id"]: item for item in self._read_evaluations(set(hypotheses))}
         frameworks = {item["id"]: item for item in self._read_frameworks(task_id)}
+        literature = {item["id"]: item for item in self._read_literature(task_id)}
+        literature_evidence = {item["id"]: item for item in self._read_literature_evidence(set(literature))}
+        citations = {item["id"]: item for item in self._read_citations(task_id)}
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for dataset in self.datasets.list_datasets(task_id):
             try:
@@ -291,6 +346,12 @@ class DependencyGraphService:
         for item in findings.values(): records[("finding", item["id"])] = item
         for item in hypotheses.values(): records[("hypothesis", item["id"])] = item
         for item in evaluations.values(): records[("hypothesis_evaluation", item["id"])] = item
+        for item in literature.values(): records[("literature", item["id"])] = item
+        for item in literature_evidence.values(): records[("literature_evidence", item["id"])] = item
+        for item in citations.values():
+            record = dict(item)
+            if str(item.get("literature_id")) not in literature or literature[str(item.get("literature_id"))].get("status") == "deleted": record["status"] = "broken"
+            records[("citation", item["id"])] = record
         for item in frameworks.values():
             record = dict(item)
             if any(evaluations.get(str(evaluation_id), {}).get("dataset_version") and self._latest_version(str(evaluations[str(evaluation_id)].get("dataset_id"))) and int(evaluations[str(evaluation_id)].get("dataset_version")) < int(self._latest_version(str(evaluations[str(evaluation_id)].get("dataset_id"))) or 0) for evaluation_id in item.get("evaluation_ids") or []):
