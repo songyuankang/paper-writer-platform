@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { DraftParagraph } from "../api/paper";
 import EditableDraftChartBlock from "./EditableDraftChartBlock";
 import EditableInsightBlock from "./EditableInsightBlock";
+import EditableCrossReferenceBlock from "./EditableCrossReferenceBlock";
 
 type BlockPatch = {
   text?: string;
@@ -18,6 +19,7 @@ type Props = {
   index: number;
   onText: (text: string) => void;
   onUpdate: (patch: BlockPatch) => Promise<void> | void;
+  onRefresh?: () => Promise<void> | void;
   onDelete: () => void;
   onMove: (direction: "up" | "down") => void;
   canMoveUp: boolean;
@@ -100,6 +102,7 @@ export default function EditableDraftBlock({
   index,
   onText,
   onUpdate,
+  onRefresh,
   onDelete,
   onMove,
   canMoveUp,
@@ -113,6 +116,9 @@ export default function EditableDraftBlock({
   }
   if (block.type === "chart") {
     return <EditableDraftChartBlock taskId={taskId} block={block} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
+  }
+  if (block.type === "cross_reference") {
+    return <EditableCrossReferenceBlock taskId={taskId} block={block} onRefresh={onRefresh || (async () => undefined)} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "table") {
     return (

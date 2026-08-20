@@ -602,11 +602,15 @@ export interface DraftChartAsset {
   data_fingerprint?: string;
   generated_at: string;
 }
+export interface CrossReference { id:string; task_id:string; source_block_id:string; target_object_id:string; target_type:"figure"|"table"; display_label:string; resolved_label?:string|null; target_title?:string|null; status:"ready"|"broken"; created_at:string; updated_at:string; }
+export interface ReferenceCandidate { id:string; type:"figure"|"table"; title:string; number:number; display_label:string; status:string; source_id:string; }
+export interface DraftContentPart { type:"text"|"cross_reference"; text?:string; reference_id?:string; }
 export interface DraftParagraph {
   id: string;
   text: string;
   version?: number;
-  type?: "paragraph" | "table" | "chart" | "insight";
+  type?: "paragraph" | "table" | "chart" | "insight" | "cross_reference" | "finding";
+  content?: DraftContentPart[];
   insight?: DraftInsightBlock;
   title?: string;
   headers?: string[];
@@ -1652,3 +1656,8 @@ export async function createResearchFinding(input:{task_id:string;analysis_id:st
 export async function insertResearchFinding(id:string,section_id:string):Promise<{block:unknown}>{const r=await apiFetch(`${API_BASE}/api/research-findings/${id}/insert`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({section_id})});if(!r.ok) throw await toError(r);return r.json();}
 export async function getTaskResearchObjects(taskId:string):Promise<{objects:ResearchObject[]}>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/research-objects`);if(!r.ok) throw await toError(r);return r.json();}
 export async function renumberTaskReferences(taskId:string):Promise<RenumberResponse>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/renumber`,{method:"POST"});if(!r.ok) throw await toError(r);return r.json();}
+export async function getReferenceCandidates(taskId:string):Promise<{objects:ReferenceCandidate[]}>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/research-objects/references`);if(!r.ok) throw await toError(r);return r.json();}
+export async function getCrossReferences(taskId:string):Promise<{references:CrossReference[]}>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/references`);if(!r.ok) throw await toError(r);return r.json();}
+export async function insertCrossReference(input:{task_id:string;section_id:string;target_object_id:string;prefix?:string;suffix?:string}):Promise<{reference:CrossReference;block:DraftParagraph}>{const r=await apiFetch(`${API_BASE}/api/tasks/${input.task_id}/references`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({section_id:input.section_id,target_object_id:input.target_object_id,prefix:input.prefix||"如",suffix:input.suffix||"所示"})});if(!r.ok) throw await toError(r);return r.json();}
+export async function updateCrossReference(taskId:string,referenceId:string,target_object_id:string):Promise<{reference:CrossReference}>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/references/${referenceId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({target_object_id})});if(!r.ok) throw await toError(r);return r.json();}
+export async function deleteCrossReference(taskId:string,referenceId:string):Promise<{ok:true}>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/references/${referenceId}`,{method:"DELETE"});if(!r.ok) throw await toError(r);return r.json();}

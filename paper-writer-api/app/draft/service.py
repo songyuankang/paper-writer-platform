@@ -17,10 +17,12 @@ import uuid
 from typing import Iterator
 from pathlib import Path
 
-from app.config import settings
+from app.config import Settings, settings
+
 from app.draft import outline as outline_mod
 from app.draft.chart_runtime import recompute_chart_block, walk_sections
 from app.services.research_object_service import renumber_document_references
+from app.services.cross_reference_service import CrossReferenceService
 
 from app.formatter import service as formatter_service
 from app.models.task import TaskStatus
@@ -225,7 +227,26 @@ class DraftService:
         self.path.write_text(
             json.dumps(draft, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _storage_settings(self) -> Settings:
+        """Resolve storage relative to this draft for isolated tests and exports.
+
+        Runtime tasks use the application singleton.  Test and E2E services may
+        point a DraftService at a temporary ``outputs/<task>`` root; deriving the
+        sibling data directory keeps ResearchObject/CrossReference lookups in the
+        same task workspace instead of silently falling back to process globals.
+        """
+        if self.task_dir.parent == settings.output_dir:
+            return settings
+        root = self.task_dir.parent.parent
+        return Settings(
+            db_path=root / "data" / "history.db",
+            output_dir=self.task_dir.parent,
+            upload_dir=root / "uploads",
+            log_dir=root / "logs",
+        )
+
     def body_char_count(self, draft: dict | None = None) -> int:
+
         """返回当前草稿正文有效字数，供生成验收和接口复用。"""
         return _body_char_count(draft if draft is not None else self.load())
 
@@ -903,17 +924,29 @@ class DraftService:
             # ResearchObject is the sole numbering authority.  It persists global
             # Figure/Table numbers before spec construction so editor and DOCX share
             # exactly the same domain facts, including old drafts without numbers.
-            renumber_document_references(self.task_id, settings, draft)
+            storage_settings = self._storage_settings()
+            renumber_document_references(self.task_id, storage_settings, draft)
             self.save(draft)
         paper = self._paper_info(draft)
+        # Text in structured references is resolved from target_object_id after
+        # renumbering; cached labels are never treated as DOCX source-of-truth.
+        cross_reference_text = CrossReferenceService(storage_settings).render_draft_text(self.task_id, draft)
 
         spec_sections: list[dict] = []
+
         for s in draft["sections"]:
             htype = {1: "h1", 2: "h2", 3: "h3"}.get(s["level"], "h2")
             spec_sections.append({"type": htype, "text": f"{s['number']} {s['title']}"})
             for p in s["paragraphs"]:
+
                 # Structured draft block export: editor and Word share the same stored block.
                 kind = p.get("type", "paragraph")
+                if kind == "cross_reference" or isinstance(p.get("content"), list):
+                    text = cross_reference_text.get(str(p.get("id")), str(p.get("text") or "")).strip()
+                    if text:
+                        spec_sections.append({"type": "p", "text": text})
+                    continue
+
                 if kind == "insight":
                     # semantic-insight export adapter: retain evidence-first summaries
                     # as a readable table or caption in the existing DOCX pipeline.

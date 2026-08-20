@@ -21,12 +21,15 @@ import {
   generateDraftEnAbstract,
   generateDraftSection,
   moveDraftParagraph,
+  getReferenceCandidates,
+  insertCrossReference,
   renumberTaskReferences,
   updateDraftParagraph,
   updateDraftSection,
   type PaperDraft,
   type DraftSection,
   type ModelConfig,
+  type ReferenceCandidate,
 } from "../api/paper";
 import TemplateManagerModal from "./TemplateManagerModal";
 
@@ -105,6 +108,9 @@ export default function BodyEditorUniPaper({
   const [revisionOpen, setRevisionOpen] = useState(false);
   const [formatOpen, setFormatOpen] = useState(false);
   const [previewTaskId, setPreviewTaskId] = useState<string | null>(null);
+  const [referencePicker, setReferencePicker] = useState<{ sectionId: string; type: "figure" | "table" } | null>(null);
+  const [referenceCandidates, setReferenceCandidates] = useState<ReferenceCandidate[]>([]);
+  const [referenceBusy, setReferenceBusy] = useState(false);
   const pollRef = useRef<number | null>(null);
 
   // 当前生效模型：本地选择优先，其次外部传入，最后默认模型
@@ -325,6 +331,33 @@ export default function BodyEditorUniPaper({
     }
   }
 
+  async function openReferencePicker(sectionId = "", type: "figure" | "table" = "figure") {
+    setError(null);
+    setReferenceBusy(true);
+    try {
+      const response = await getReferenceCandidates(taskId);
+      setReferenceCandidates(response.objects);
+      setReferencePicker({ sectionId, type });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "无法加载可引用对象");
+    } finally { setReferenceBusy(false); }
+  }
+
+  async function insertReference(targetObjectId: string) {
+    if (!referencePicker?.sectionId) {
+      setError("请先选择要插入引用的正文小节");
+      return;
+    }
+    setReferenceBusy(true);
+    try {
+      await insertCrossReference({ task_id: taskId, section_id: referencePicker.sectionId, target_object_id: targetObjectId });
+      setReferencePicker(null);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "插入引用失败");
+    } finally { setReferenceBusy(false); }
+  }
+
   async function renumberReferences() {
     setError(null);
     try {
@@ -444,6 +477,7 @@ export default function BodyEditorUniPaper({
         )}
         <nav className="hidden items-center gap-3 text-sm text-neutral-600 sm:flex" aria-label="编辑器工具">
           <a href={`/lab/${taskId}`} className="font-medium text-blue-700 hover:text-blue-900">Visualization Lab</a>
+          <button type="button" onClick={() => void openReferencePicker()} className="hover:text-black">引用</button>
           <button type="button" onClick={() => setTemplateManagerOpen(true)} className="hover:text-black">模板管理</button>
           <button type="button" onClick={() => setHistoryOpen(true)} className="hover:text-black">历史记录</button>
           <button type="button" onClick={() => setModelSettingsOpen(true)} className="hover:text-black">模型设置</button>
@@ -588,6 +622,31 @@ export default function BodyEditorUniPaper({
           void handleExport(templateId);
         }}
       />
+      <EditorModalShell
+        open={Boolean(referencePicker)}
+        onClose={() => setReferencePicker(null)}
+        title="插入交叉引用"
+        description="引用标签由目标 ResearchObject 的当前正式编号动态确定；重编号后正文和 DOCX 会同步更新。"
+      >
+        {referencePicker && <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-xs text-neutral-600">插入到正文小节
+              <select value={referencePicker.sectionId} onChange={(event) => setReferencePicker({ ...referencePicker, sectionId: event.target.value })} className="mt-1 w-full rounded border border-neutral-300 bg-white px-2 py-2 text-sm text-neutral-900">
+                <option value="">请选择小节</option>
+                {sections.map((section) => <option key={section.id} value={section.id}>{section.number} {section.title}</option>)}
+              </select>
+            </label>
+            <div className="text-xs text-neutral-600">引用类型
+              <div className="mt-1 flex gap-2"><button type="button" onClick={() => setReferencePicker({ ...referencePicker, type: "figure" })} className={referencePicker.type === "figure" ? BTN_BLACK : BTN_GHOST}>引用图</button><button type="button" onClick={() => setReferencePicker({ ...referencePicker, type: "table" })} className={referencePicker.type === "table" ? BTN_BLACK : BTN_GHOST}>引用表</button></div>
+            </div>
+          </div>
+          <div className="space-y-2 rounded border border-neutral-200 p-3">
+            {(referenceCandidates.filter((item) => item.type === referencePicker.type)).map((item) => <button type="button" key={item.id} disabled={referenceBusy} onClick={() => void insertReference(item.id)} className="flex w-full items-center justify-between rounded border border-neutral-200 px-3 py-2 text-left text-sm transition hover:border-black disabled:opacity-40"><span className="font-medium">{item.display_label}</span><span className="ml-3 flex-1 truncate text-neutral-700">{item.title}</span><span className="text-xs text-neutral-400">插入</span></button>)}
+            {!referenceBusy && referenceCandidates.filter((item) => item.type === referencePicker.type).length === 0 && <p className="text-sm text-neutral-500">当前论文没有可引用的{referencePicker.type === "figure" ? "图" : "表"}。</p>}
+            {referenceBusy && <p className="text-sm text-neutral-500">正在加载对象…</p>}
+          </div>
+        </div>}
+      </EditorModalShell>
 
       {/* ============ 主体：左目录树 + 右正文流 ============ */}
       <div className="flex flex-1 overflow-hidden">
@@ -851,7 +910,10 @@ export default function BodyEditorUniPaper({
                           onAdd={() => void addPara(child.id)}
                           onAddTable={() => void addTableBlock(child.id)}
           onCreateChart={() => void createChart(child.id)}
-          onCreateInsight={() => void createInsight(child.id)}
+                                    onCreateInsight={() => void createInsight(child.id)}
+                          onReference={(type) => void openReferencePicker(child.id, type)}
+                          onRefresh={async () => { await refresh(); }}
+
           onChartUpdate={(id, patch) => void patchChart(id, patch)}
           onRegenerateChart={(id) => void regenerateChart(id)}
                           onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
@@ -878,6 +940,8 @@ export default function BodyEditorUniPaper({
                           onAddTable={() => void addTableBlock(g.id)}
                             onCreateChart={() => void createChart(g.id)}
                             onCreateInsight={() => void createInsight(g.id)}
+                            onReference={(type) => void openReferencePicker(g.id, type)}
+                            onRefresh={async () => { await refresh(); }}
                             onChartUpdate={(id, patch) => void patchChart(id, patch)}
                             onRegenerateChart={(id) => void regenerateChart(id)}
                           onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
@@ -1112,6 +1176,8 @@ function LeafSection({
   onAddTable,
   onCreateChart,
   onCreateInsight,
+  onReference,
+  onRefresh,
   onChartUpdate,
   onRegenerateChart,
   onPatchPara,
@@ -1128,6 +1194,8 @@ function LeafSection({
   onAddTable: () => void;
   onCreateChart: () => void;
   onCreateInsight: () => void;
+  onReference: (type: "figure" | "table") => void;
+  onRefresh: () => Promise<void> | void;
   onChartUpdate: (id: string, patch: { title?: string; caption?: string; display_scale?: number }) => void;
   onRegenerateChart: (id: string) => void;
   onPatchPara: (pid: string, text: string) => void;
@@ -1162,6 +1230,7 @@ function LeafSection({
             index={i}
             onText={(text) => onPatchPara(p.id, text)}
             onUpdate={(patch) => onPatchBlock(p.id, patch)}
+            onRefresh={onRefresh}
             onChartUpdate={(patch) => onChartUpdate(p.id, patch)}
             onRegenerateChart={() => onRegenerateChart(p.id)}
             onDelete={() => onDel(p.id)}
@@ -1185,6 +1254,8 @@ function LeafSection({
         </button>
         <button type="button" onClick={onAddTable} className={BTN_GHOST}>+ 新增表格</button>
         <button type="button" onClick={onCreateChart} className={BTN_GHOST}>+ 从表格生成图表</button>
+        <button type="button" onClick={() => onReference("figure")} className={BTN_GHOST}>引用图</button>
+        <button type="button" onClick={() => onReference("table")} className={BTN_GHOST}>引用表</button>
         <button type="button" onClick={onCreateInsight} className={BTN_GHOST}>+ 总结生成</button>
       </div>
     </div>
