@@ -39,7 +39,7 @@ export default function OneClickConfirmModal({
           <div><p className="text-xs text-slate-500">待生成章节</p><p className="mt-1 font-medium">{sectionCount}</p></div>
         </div>
         <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
-          将根据当前大纲和段落主旨生成正文。生成开始后，顶部按钮会显示“生成中”，以避免重复提交。
+          系统会按章节实时写入正文，并按需检索公开资料。只有已保存、可追溯且通过核验的数据才会生成定量图表；文献元数据可形成研究现状表或年度分布图。所有表图会直接插入对应正文位置，并支持暂停、继续和局部重新生成。
         </p>
         <div className="flex justify-end gap-3 border-t border-slate-200 pt-4">
           <button type="button" disabled={busy} onClick={onClose} className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-700 transition hover:bg-slate-50 disabled:opacity-50">取消</button>

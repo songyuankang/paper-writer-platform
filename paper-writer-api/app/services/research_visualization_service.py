@@ -484,6 +484,90 @@ class ResearchVisualizationService:
         self.graph.rebuild_task(task_id)
         return candidates
 
+    def recommend_literature_trend(self, *, task_id: str, section: str = "") -> list[dict[str, Any]]:
+        """Build a source-backed literature-year chart candidate.
+
+        Counts are deterministically derived from saved literature metadata rather
+        than being model-generated numeric claims.  Every plotted value retains a
+        snapshot of the individual source records that contributed to it.
+        """
+        task_id = _task_id(task_id)
+        records = []
+        for item in self.literature.list(task_id):
+            try:
+                year = int(item.get("year"))
+            except (TypeError, ValueError):
+                continue
+            if 1800 <= year <= 2200:
+                records.append((year, item))
+        buckets: dict[int, int] = defaultdict(int)
+        for year, _ in records:
+            buckets[year] += 1
+        if len(buckets) < 2:
+            return []
+        ordered = sorted(buckets.items())
+        sources = [item for _, item in records]
+        dataset = self._csv_dataset(
+            task_id=task_id,
+            title="已保存文献年度分布数据",
+            headers=["年份", "文献数量"],
+            rows=[[year, count] for year, count in ordered],
+            description="由已保存文献元数据的年份字段确定性聚合，保留来源快照。",
+        )
+        version = self.datasets.get_version(dataset["dataset_id"], int(dataset["version"]), include_rows=True)
+        service = self._draft_service(task_id)
+        draft = service.load()
+        chart_id = f"chart_rv_{uuid.uuid4().hex[:12]}"
+        block = create_lab_chart_from_dataset(
+            draft,
+            service.task_dir,
+            chart_id,
+            external_dataset_version(version),
+            title_hint="已保存文献年度分布",
+            kind="bar",
+        )
+        snapshot = [{
+            "source_type": "literature", "source_id": item["id"],
+            "source_title": item.get("title"), "source_updated_at": item.get("updated_at"),
+            "verification_status": VERIFIED,
+        } for item in sources]
+        block["research_visualization"] = {
+            "kind": "literature_metadata_chart",
+            "source_snapshot": snapshot,
+            "dataset_id": dataset["dataset_id"],
+            "dataset_version": dataset["version"],
+            "derivation": "按已保存文献元数据年份字段计数",
+        }
+        service.save(draft)
+        chart = {
+            "chart_id": chart_id,
+            "dataset_id": dataset["dataset_id"],
+            "dataset_version": dataset["version"],
+            "asset": block.get("asset"),
+            "block_snapshot": copy.deepcopy(block),
+        }
+        candidate = {
+            "id": f"rv_{uuid.uuid4().hex[:16]}",
+            "task_id": task_id,
+            "section_hint": _clean(section, 240),
+            "kind": "chart",
+            "chart_kind": "bar",
+            "title": "已保存文献年度分布",
+            "reason": "图表数值由已保存文献的年份元数据确定性统计而来，适合展示研究资料的时间分布。",
+            "status": "ready",
+            "requires_confirmation": False,
+            "auto_insert_eligible": True,
+            "chart": chart,
+            "dataset_id": dataset["dataset_id"],
+            "dataset_version": dataset["version"],
+            "source_snapshot": snapshot,
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        self._write(self._candidate_path(candidate["id"]), candidate)
+        self.graph.rebuild_task(task_id)
+        return [candidate]
+
     def preview(self, candidate_id: str) -> dict[str, Any]:
         candidate = self._candidate(candidate_id)
         self.refresh_status(candidate["task_id"])

@@ -101,6 +101,7 @@ function ChartAsset({ taskId, block }: { taskId: string; block: DraftParagraph }
 export default function EditableDraftChartBlock({ taskId, block, onUpdate, onRegenerate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [showSources, setShowSources] = useState(false);
   const [title, setTitle] = useState(text(block.title, "图表"));
   const [caption, setCaption] = useState(text(block.caption));
   const scale = block.display_scale ?? 0.75;
@@ -109,6 +110,10 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
   const label = useMemo(() => ({ bar: "柱状图", line: "折线图", mixed: "柱线混合图", pie: "饼图" }[chart.kind] || "图表"), [chart.kind]);
   const figureNumber = typeof block.figure_number === "number" && block.figure_number > 0 ? `图${block.figure_number}` : "图（待编号）";
   const stale = block.status === "stale";
+  const research = block.research_visualization;
+  const sourceTitles = Array.from(new Set((research?.source_snapshot || []).map((item) => item.source_title || "已保存公开来源").filter(Boolean))).slice(0, 8);
+  const evidenceCount = research?.evidence_ids?.length || 0;
+  const researchSourceLabel = research?.dataset_version ? `研究数据版本 ${research.dataset_version}` : "已保存公开来源";
 
   async function savePatch(patch: ChartPatch) { if (!onUpdate) return; setBusy(true); try { await onUpdate(patch); } finally { setBusy(false); } }
   async function regenerate() { if (!onRegenerate) return; setBusy(true); try { await onRegenerate(); } finally { setBusy(false); } }
@@ -117,7 +122,8 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
     <div className="flex flex-wrap items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
       <span className="font-medium text-neutral-800">{label}</span><span className="text-neutral-300">|</span>
       <button type="button" onClick={regenerate} disabled={busy} className="rounded px-2 py-1 hover:bg-neutral-200 disabled:opacity-50">{busy ? "计算中…" : stale ? "↻ 重新计算" : "↻ 重新计算"}</button>
-      <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">{provenance}</span>
+      <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">{research ? "来源已追溯" : provenance}</span>
+      {research && <button type="button" onClick={() => setShowSources((value) => !value)} className="rounded px-2 py-1 text-blue-700 hover:bg-blue-50">{showSources ? "收起来源" : "查看来源"}</button>}
       {stale && <span className="rounded bg-amber-100 px-2 py-1 text-amber-800">数据表已修改</span>}
       <span className="ml-auto">图表比例</span>
       <select aria-label="图表比例" value={scale} disabled={busy} onChange={(event) => void savePatch({ display_scale: Number(event.target.value) })} className="rounded border border-neutral-300 bg-white px-2 py-1">
@@ -129,7 +135,8 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
       <button type="button" aria-label="删除图表" onClick={onDelete} className="rounded px-2 py-1 text-red-600 hover:bg-red-50">⌫</button>
     </div>
     {stale && <p className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800">{block.stale_reason || "关联论文表格已变更；请重新计算后再导出。"}</p>}
+    {showSources && research && <section className="border-b border-blue-100 bg-blue-50/50 px-4 py-3 text-xs text-neutral-700"><div className="grid gap-3 sm:grid-cols-2"><div><p className="font-medium text-neutral-900">数据与生成方式</p><p className="mt-1">{researchSourceLabel}</p><p className="mt-1">{research.derivation || "基于已保存、可追溯资料生成图表"}</p></div><div><p className="font-medium text-neutral-900">证据与引用</p><p className="mt-1">已关联 {evidenceCount} 条可核验证据；引用会随论文编号自动更新。</p><a href={`/research/${taskId}/data`} className="mt-1 inline-block text-blue-700 underline underline-offset-2">查看数据中心</a></div></div>{sourceTitles.length > 0 && <div className="mt-3 border-t border-blue-100 pt-2"><p className="font-medium text-neutral-900">文献/公开资料来源</p><ul className="mt-1 list-disc space-y-1 pl-4">{sourceTitles.map((title) => <li key={title}>{title}</li>)}</ul></div>}</section>}
     {editing && <div className="grid gap-3 border-b border-neutral-200 bg-white px-4 py-3 sm:grid-cols-2"><label className="text-xs text-neutral-600">图表标题<input value={title} maxLength={80} onChange={(event) => setTitle(event.target.value)} onBlur={() => void savePatch({ title })} className="mt-1 w-full rounded border border-neutral-300 px-2 py-1.5 text-sm text-neutral-900" /></label><label className="text-xs text-neutral-600">图注<textarea value={caption} maxLength={180} onChange={(event) => setCaption(event.target.value)} onBlur={() => void savePatch({ caption })} className="mt-1 min-h-[60px] w-full rounded border border-neutral-300 px-2 py-1.5 text-sm text-neutral-900" /></label></div>}
-    <div className="mx-auto" style={{ width: String(scale * 100) + "%", minWidth: "min(100%, 560px)" }}><div className="px-5 pt-5 text-center"><h4 className="text-base font-semibold text-neutral-900">{block.title}</h4></div><ChartAsset taskId={taskId} block={block} /><div className="px-5 pb-4 text-center"><p className="text-sm font-medium text-neutral-800">{figureNumber} {block.title}</p><p className="mt-1 text-xs text-neutral-500">{block.caption}</p>{block.provenance !== "user_provided" && <p className="mt-1 text-xs text-amber-700">数据为模型/示意生成，未自动检索或核验外部来源。</p>}</div></div>
+    <div className="mx-auto" style={{ width: String(scale * 100) + "%", minWidth: "min(100%, 560px)" }}><div className="px-5 pt-5 text-center"><h4 className="text-base font-semibold text-neutral-900">{block.title}</h4></div><ChartAsset taskId={taskId} block={block} /><div className="px-5 pb-4 text-center"><p className="text-sm font-medium text-neutral-800">{figureNumber} {block.title}</p><p className="mt-1 text-xs text-neutral-500">{block.caption}</p>{!research && block.provenance !== "user_provided" && <p className="mt-1 text-xs text-amber-700">数据为模型/示意生成，未自动检索或核验外部来源。</p>}</div></div>
   </article>;
 }

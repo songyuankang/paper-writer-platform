@@ -614,6 +614,28 @@ export interface ResearchImpact { source:DependencyNode; analyses:DependencyNode
 export interface FindingEvidence { finding:DependencyNode; dataset:Record<string,unknown>; analysis:DependencyNode; result:DependencyNode; explanation:DependencyNode; tables:DependencyNode[]; figures:DependencyNode[]; cross_references:DependencyNode[]; }
 export interface ReferenceCandidate { id:string; type:"figure"|"table"; title:string; number:number; display_label:string; status:string; source_id:string; }
 export interface DraftContentPart { type:"text"|"cross_reference"; text?:string; reference_id?:string; }
+export interface FullPaperPipelineState {
+  version?: number;
+  status?: "running" | "pause_requested" | "paused" | "completed" | "failed" | "resuming";
+  stage?: string;
+  message?: string;
+  current_section_id?: string;
+  completed_section_ids?: string[];
+  research_section_ids?: string[];
+  inserted_block_ids?: string[];
+  progress?: number;
+  error?: string;
+}
+
+export interface DraftResearchVisualization {
+  candidate_id?: string;
+  evidence_ids?: string[];
+  dataset_id?: string;
+  dataset_version?: number;
+  source_snapshot?: Array<{ source_type?: string; source_id?: string; source_title?: string; source_updated_at?: string; verification_status?: string }>;
+  derivation?: string;
+}
+
 export interface DraftParagraph {
   id: string;
   text: string;
@@ -637,7 +659,11 @@ export interface DraftParagraph {
   stale_reason?: string | null;
   display_scale?: number;
   provenance?: "user_provided" | "model_generated" | "illustrative";
-  status?: "ready" | "stale" | "generating" | "failed";
+  status?: "ready" | "stale" | "generating" | "failed" | "broken";
+  generation_origin?: string;
+  auto_full_paper?: boolean;
+  generated_by?: string;
+  research_visualization?: DraftResearchVisualization;
 }
 export interface DraftSection {
   id: string;
@@ -693,6 +719,7 @@ export interface PaperDraft {
     actual: number;
     shortfall: number;
   };
+  full_paper_pipeline?: FullPaperPipelineState;
 }
 
 async function draftFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -724,7 +751,7 @@ export const deleteDraftOutlineSection = (taskId: string, sectionId: string): Pr
 
 export const fetchDraftStatus = (
   taskId: string,
-): Promise<{ generating: boolean; progress: number; done: number; total: number }> =>
+): Promise<{ generating: boolean; progress: number; done: number; total: number; pipeline?: FullPaperPipelineState }> =>
   draftFetch(`/api/draft/${taskId}/status`);
 
 export const generateDraftSection = (
@@ -811,8 +838,32 @@ export const moveDraftParagraph = (
 export const startDraftOneclick = (
   taskId: string,
   modelId?: string,
-): Promise<{ ok: boolean }> =>
+): Promise<{ ok: boolean; pipeline?: FullPaperPipelineState }> =>
   draftFetch(`/api/draft/${taskId}/oneclick`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+
+export const pauseDraftOneclick = (taskId: string): Promise<{ ok: boolean; pipeline: FullPaperPipelineState }> =>
+  draftFetch(`/api/draft/${taskId}/oneclick/pause`, { method: "POST" });
+
+export const resumeDraftOneclick = (
+  taskId: string,
+  modelId?: string,
+): Promise<{ ok: boolean; pipeline?: FullPaperPipelineState }> =>
+  draftFetch(`/api/draft/${taskId}/oneclick/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model_id: modelId }),
+  });
+
+export const regenerateFullDraftSection = (
+  taskId: string,
+  sectionId: string,
+  modelId?: string,
+): Promise<{ ok: boolean; pipeline?: FullPaperPipelineState }> =>
+  draftFetch(`/api/draft/${taskId}/section/${sectionId}/full-regenerate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model_id: modelId }),

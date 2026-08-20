@@ -46,6 +46,7 @@ from app.draft.chart_blocks import (
 )
 from app.services import history_service
 from app.services.dataset_service import DatasetService
+from app.services.full_paper_generation_service import FullPaperGenerationService
 
 router = APIRouter(prefix="/api/draft", tags=["draft"])
 _TASK_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -185,15 +186,11 @@ def delete_outline_section(task_id: str, section_id: str, request: Request) -> d
 
 @router.get("/{task_id}/status")
 def draft_status(task_id: str, request: Request) -> dict:
-    draft = _service(task_id, request).load()
+    service = _service(task_id, request)
+    draft = service.load()
     if not draft:
         raise HTTPException(status_code=404, detail="草稿不存在")
-    return {
-        "generating": draft.get("generating", False),
-        "progress": draft.get("progress", 0),
-        "done": draft.get("done", 0),
-        "total": draft.get("total", 0),
-    }
+    return FullPaperGenerationService(service).status()
 
 
 @router.post("/{task_id}/section/{section_id}/generate")
@@ -270,38 +267,71 @@ def update_content_block(task_id: str, block_id: str, body: BlockUpdateRequest, 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-@router.post("/{task_id}/oneclick")
-def oneclick(task_id: str, body: GenerateRequest, request: Request) -> dict:
-    service = _service(task_id, request)
-    draft = service.load()
-    if not draft:
-        raise HTTPException(status_code=404, detail="草稿不存在")
-    if draft.get("generating"):
-        raise HTTPException(status_code=400, detail="正在生成中，请稍候")
-    try:
-        service.ensure_outline_confirmed()
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+def _start_full_paper_thread(task_id: str, service: DraftService, model_id: str | None, *, resume: bool = False, section_id: str | None = None) -> None:
+    pipeline = FullPaperGenerationService(service)
 
     def run() -> None:
         try:
-            service.oneclick(body.model_id)
-            # 草稿模式的一键全文不经过 paper_service 的常规完成分支，
-            # 必须在这里同步历史记录状态。
-            history_service.update_record(
-                task_id, status="completed", error=None, completed=False)
-            history_service.update_record_progress(
-                task_id, current_stage="completed", progress=100)
-        except Exception:  # noqa: BLE001
-            with service.lock:
-                d = service.load()
-                d["generating"] = False
-                service.save(d)
-            history_service.update_record(
-                task_id, status="failed", error="一键全文生成失败")
+            if section_id:
+                pipeline.regenerate_section(section_id, model_id)
+            else:
+                pipeline.run(model_id)
+            state = pipeline.status().get("pipeline") or {}
+            if state.get("status") == "paused":
+                history_service.update_record_progress(task_id, current_stage="paused", progress=int(pipeline.status().get("progress") or 0))
+                return
+            history_service.update_record(task_id, status="completed", error=None, completed=False)
+            history_service.update_record_progress(task_id, current_stage="completed", progress=100)
+        except Exception as exc:  # noqa: BLE001
+            pipeline._save_state(status="failed", stage="failed", message="全文生成失败", error=str(exc))
+            history_service.update_record(task_id, status="failed", error="一键全文生成失败")
 
     threading.Thread(target=run, daemon=True).start()
-    return {"ok": True, "message": "开始一键全文生成"}
+
+
+@router.post("/{task_id}/oneclick")
+def oneclick(task_id: str, body: GenerateRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    pipeline = FullPaperGenerationService(service)
+    try:
+        state = pipeline.start(body.model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _start_full_paper_thread(task_id, service, body.model_id)
+    return {"ok": True, "message": "已启动全文生成流水线", "pipeline": state}
+
+
+@router.post("/{task_id}/oneclick/pause")
+def pause_oneclick(task_id: str, request: Request) -> dict:
+    try:
+        state = FullPaperGenerationService(_service(task_id, request)).pause()
+        return {"ok": True, "pipeline": state}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/oneclick/resume")
+def resume_oneclick(task_id: str, body: GenerateRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    pipeline = FullPaperGenerationService(service)
+    try:
+        state = pipeline.start(body.model_id, resume=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _start_full_paper_thread(task_id, service, body.model_id, resume=True)
+    return {"ok": True, "message": "已继续全文生成流水线", "pipeline": state}
+
+
+@router.post("/{task_id}/section/{section_id}/full-regenerate")
+def regenerate_full_section(task_id: str, section_id: str, body: GenerateRequest, request: Request) -> dict:
+    service = _service(task_id, request)
+    pipeline = FullPaperGenerationService(service)
+    try:
+        state = pipeline.start(body.model_id) if not service.load().get("generating") else pipeline.status().get("pipeline") or {}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _start_full_paper_thread(task_id, service, body.model_id, section_id=section_id)
+    return {"ok": True, "message": "已启动当前章节重新生成", "pipeline": state}
 
 
 @router.post("/{task_id}/acknowledgement")

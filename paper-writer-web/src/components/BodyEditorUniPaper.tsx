@@ -14,6 +14,9 @@ import {
   updateDraftChart,
   deleteDraftParagraph,
   startDraftOneclick,
+  pauseDraftOneclick,
+  resumeDraftOneclick,
+  regenerateFullDraftSection,
   downloadUrl,
   exportDraft,
   fetchDraft,
@@ -97,6 +100,7 @@ export default function BodyEditorUniPaper({
   const [selModel, setSelModel] = useState<string>(modelId || "");
   const [genSection, setGenSection] = useState<string | null>(null);
   const [oneclickStarting, setOneclickStarting] = useState(false);
+  const [pipelineActionBusy, setPipelineActionBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exportedFiles, setExportedFiles] = useState<string[] | null>(null);
@@ -208,6 +212,45 @@ export default function BodyEditorUniPaper({
       setError(err instanceof Error ? err.message : "启动失败");
     } finally {
       setOneclickStarting(false);
+    }
+  }
+
+  async function handlePauseOneclick() {
+    setError(null);
+    setPipelineActionBusy(true);
+    try {
+      await pauseDraftOneclick(taskId);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "暂停失败");
+    } finally {
+      setPipelineActionBusy(false);
+    }
+  }
+
+  async function handleResumeOneclick() {
+    setError(null);
+    setPipelineActionBusy(true);
+    try {
+      await resumeDraftOneclick(taskId, activeModel || undefined);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "继续生成失败");
+    } finally {
+      setPipelineActionBusy(false);
+    }
+  }
+
+  async function handleFullSectionRegenerate(section: DraftSection) {
+    setError(null);
+    setGenSection(section.id);
+    try {
+      await regenerateFullDraftSection(taskId, section.id, activeModel || undefined);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "当前章节重新生成失败");
+    } finally {
+      setGenSection(null);
     }
   }
 
@@ -410,6 +453,9 @@ export default function BodyEditorUniPaper({
   const pct = target > 0 ? Math.min(100, Math.round((totalWords / target) * 100)) : 0;
   const sections = draft.sections;
   const roots = sections.filter((s) => s.level === 1);
+  const pipeline = draft.full_paper_pipeline;
+  const pipelinePaused = pipeline?.status === "paused";
+  const pipelineRunning = draft.generating || pipeline?.status === "running" || pipeline?.status === "pause_requested";
 
   return (
     <div className="flex min-h-screen flex-col bg-white text-neutral-900">
@@ -450,14 +496,13 @@ export default function BodyEditorUniPaper({
             </span>
           )}
         </div>
-        {draft.generating && (
-          <span className="flex items-center gap-2 text-xs text-neutral-500">
+        {pipelineRunning && (
+          <span className="flex max-w-[320px] items-center gap-2 truncate text-xs text-neutral-600" title={pipeline?.message}>
             <span className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-300 border-t-black" />
-            {wordStatus === "supplementing"
-              ? `字数补写中（第 ${draft.supplement_rounds || 1} 轮）`
-              : `首轮生成中 ${draft.done}/${draft.total}`}
+            {pipeline?.message || (wordStatus === "supplementing" ? `字数补写中（第 ${draft.supplement_rounds || 1} 轮）` : `正在生成正文 ${draft.done}/${draft.total}`)}
           </span>
         )}
+        {pipelinePaused && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">已暂停：{pipeline?.message || "可继续生成"}</span>}
         <div className="flex-1" />
         {/* 模型切换（黑胶囊） */}
         {models && models.length > 0 && (
@@ -490,13 +535,23 @@ export default function BodyEditorUniPaper({
         >
           重新编号
         </button>
+        {pipelineRunning && (
+          <button type="button" onClick={() => void handlePauseOneclick()} disabled={pipelineActionBusy} className={BTN_GHOST}>
+            {pipelineActionBusy ? "处理中…" : "暂停生成"}
+          </button>
+        )}
+        {pipelinePaused && (
+          <button type="button" onClick={() => void handleResumeOneclick()} disabled={pipelineActionBusy} className={BTN_BLACK}>
+            {pipelineActionBusy ? "处理中…" : "继续生成"}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setOneclickConfirmOpen(true)}
-          disabled={draft.generating || oneclickStarting}
+          disabled={pipelineRunning || oneclickStarting || pipelinePaused}
           className={BTN_BLACK}
         >
-          {oneclickStarting ? "启动中…" : draft.generating ? "生成中…" : "一键全文"}
+          {oneclickStarting ? "启动中…" : pipelineRunning ? "全文生成中…" : pipelinePaused ? "已暂停" : "一键全文"}
         </button>
         <button
           type="button"
@@ -907,6 +962,7 @@ export default function BodyEditorUniPaper({
                           genSection={genSection}
                           onPatch={(patch) => void patchSection(child.id, patch)}
                           onGenerate={() => void handleGenerateSection(child)}
+                          onRegenerateFull={() => void handleFullSectionRegenerate(child)}
                           onAdd={() => void addPara(child.id)}
                           onAddTable={() => void addTableBlock(child.id)}
           onCreateChart={() => void createChart(child.id)}
@@ -936,6 +992,7 @@ export default function BodyEditorUniPaper({
                             genSection={genSection}
                             onPatch={(patch) => void patchSection(g.id, patch)}
                             onGenerate={() => void handleGenerateSection(g)}
+                            onRegenerateFull={() => void handleFullSectionRegenerate(g)}
                             onAdd={() => void addPara(g.id)}
                           onAddTable={() => void addTableBlock(g.id)}
                             onCreateChart={() => void createChart(g.id)}
@@ -1172,6 +1229,7 @@ function LeafSection({
   genSection,
   onPatch,
   onGenerate,
+  onRegenerateFull,
   onAdd,
   onAddTable,
   onCreateChart,
@@ -1190,6 +1248,7 @@ function LeafSection({
   genSection: string | null;
   onPatch: (patch: { title?: string; gist?: string }) => void;
   onGenerate: () => void;
+  onRegenerateFull: () => void;
   onAdd: () => void;
   onAddTable: () => void;
   onCreateChart: () => void;
@@ -1248,6 +1307,9 @@ function LeafSection({
           className={BTN_BLACK}
         >
           {genSection === section.id ? "生成中…" : "生成段落"}
+        </button>
+        <button type="button" onClick={onRegenerateFull} disabled={genSection === section.id} className={BTN_GHOST}>
+          重新生成本节
         </button>
         <button type="button" onClick={onAdd} className={BTN_GHOST}>
           + 新增段落
