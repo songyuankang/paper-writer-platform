@@ -577,7 +577,7 @@ class ResearchVisualizationService:
     def _source_literature_ids(self, candidate: dict[str, Any]) -> list[str]:
         return list(dict.fromkeys(str(item.get("source_id")) for item in candidate.get("source_snapshot") or [] if item.get("source_type") == "literature" and item.get("source_id")))
 
-    def insert(self, *, candidate_id: str, section_id: str) -> dict[str, Any]:
+    def insert(self, *, candidate_id: str, section_id: str, insert_index: int | None = None) -> dict[str, Any]:
         candidate = self._candidate(candidate_id)
         self.refresh_status(candidate["task_id"])
         candidate = self._candidate(candidate_id)
@@ -601,7 +601,15 @@ class ResearchVisualizationService:
                         raise
                     draft.setdefault("chart_library", []).append(copy.deepcopy(snapshot))
                     block = insert_chart_into_section(draft, chart_id, section_id)
-                block["research_visualization"] = {"candidate_id": candidate_id, "evidence_ids": candidate.get("evidence_ids") or [], "source_snapshot": candidate.get("source_snapshot") or [], "dataset_id": (candidate.get("chart") or {}).get("dataset_id"), "dataset_version": (candidate.get("chart") or {}).get("dataset_version")}
+                block["research_visualization"] = {"candidate_id": candidate_id, "evidence_ids": candidate.get("evidence_ids") or [], "source_snapshot": candidate.get("source_snapshot") or [], "dataset_id": (candidate.get("chart") or {}).get("dataset_id"), "dataset_version": (candidate.get("chart") or {}).get("dataset_version"), "derivation": ((candidate.get("chart") or {}).get("block_snapshot") or {}).get("research_visualization", {}).get("derivation")}
+                if insert_index is not None:
+                    section = next((item for item in walk_sections(draft.get("sections") or []) if item.get("id") == section_id), None)
+                    if section:
+                        blocks = section.setdefault("paragraphs", [])
+                        current_index = next((index for index, item in enumerate(blocks) if item.get("id") == block.get("id")), None)
+                        if current_index is not None:
+                            blocks.pop(current_index)
+                            blocks.insert(max(0, min(int(insert_index), len(blocks))), block)
                 self.objects.renumber_document_references(task_id, draft)
                 service.save(draft)
             inserted = {"block": block}
@@ -614,7 +622,11 @@ class ResearchVisualizationService:
                 spec = candidate.get("table_spec") or {}
                 block = {"id": f"table_rv_{uuid.uuid4().hex[:12]}", "type": "table", "title": _clean(spec.get("title"), 200) or candidate["title"], "headers": list(spec.get("headers") or []), "rows": list(spec.get("rows") or []), "status": "ready", "generated_at": _now(), "provenance": "verified_research_evidence", "research_visualization": {"candidate_id": candidate_id, "evidence_ids": candidate.get("evidence_ids") or [], "source_snapshot": candidate.get("source_snapshot") or []}}
                 upsert_table_dataset(draft, block)
-                section.setdefault("paragraphs", []).append(block)
+                blocks = section.setdefault("paragraphs", [])
+                if insert_index is None:
+                    blocks.append(block)
+                else:
+                    blocks.insert(max(0, min(int(insert_index), len(blocks))), block)
                 self.objects.renumber_document_references(task_id, draft)
                 service.save(draft)
             inserted = {"block": block}

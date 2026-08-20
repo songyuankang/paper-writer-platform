@@ -503,6 +503,13 @@ export default function BodyEditorUniPaper({
           </span>
         )}
         {pipelinePaused && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">已暂停：{pipeline?.message || "可继续生成"}</span>}
+        {(pipelineRunning || pipeline?.status === "completed") && (pipeline?.visualization_plan || (pipeline?.visualization_insertions?.length ?? 0) > 0) && (
+          <span className="hidden max-w-[360px] items-center gap-1 truncate text-[11px] text-emerald-700 lg:flex" title={pipeline?.visualization_insertions?.map((item) => `${item.label} ${item.title}`).join("；") || pipeline?.visualization_plan?.candidate_titles?.join("；")}>
+            {pipeline?.visualization_insertions?.length
+              ? <>已插入 {pipeline.visualization_insertions.map((item) => item.label).join("、")}</>
+              : <>已找到 {pipeline?.visualization_plan?.candidate_count ?? 0} 个可插入研究表图</>}
+          </span>
+        )}
         <div className="flex-1" />
         {/* 模型切换（黑胶囊） */}
         {models && models.length > 0 && (

@@ -194,52 +194,93 @@ class FullPaperGenerationService:
         return block_id
 
     def _research_for_section(self, section: dict, model_id: str | None) -> None:
-        """Search once per task, then insert only provenance-backed candidates."""
+        """Run the existing research-visualization pipeline and insert formal blocks.
+
+        A user has already authorized this work by starting one-click generation.
+        Candidates remain provenance-gated; this orchestration only bypasses the
+        *manual UI confirmation* and never the evidence or freshness checks.
+        """
         section_id = str(section["id"])
-        self._checkpoint("research_planning", f"正在为 {section.get('number', '')} 检索可核验资料", section_id=section_id)
+        section_label = f"{section.get('number', '')} {section.get('title', '')}".strip()
+        self._checkpoint("research_planning", f"正在分析 {section_label} 是否需要研究表图", section_id=section_id)
         state = self._state(self.draft_service.load())
         if section_id in set(state.get("research_section_ids") or []):
             return
         plan = self.research.plan(self.task_id) if (self.research.root / "plans" / f"{self.task_id}.json").exists() else self.research.create_plan(
             task_id=self.task_id,
             topic=self.draft_service.load().get("title") or section.get("title") or "研究主题",
-            chapter=f"{section.get('number', '')} {section.get('title', '')}",
+            chapter=section_label,
             research_question=str(section.get("gist") or ""),
             model_id=model_id,
         )
-        self._checkpoint("research_search", "正在检索公开学术资料", section_id=section_id)
+        self._checkpoint("research_search", f"正在检索 {section_label} 的公开学术资料", section_id=section_id)
         search = self.research.search(task_id=self.task_id, limit=5)
         sources = list(search.get("results") or [])[:8]
         if sources:
             self.research.save_sources(task_id=self.task_id, sources=sources)
             self._checkpoint("evidence_verification", "正在提取并核验来源证据", section_id=section_id)
             self.research.extract(task_id=self.task_id)
-        if not self._checkpoint("visualization_planning", "正在生成可追溯表格与图表", section_id=section_id):
+        if not self._checkpoint("visualization_planning", "正在调用研究可视化流水线生成正式表图", section_id=section_id):
             return
-        candidates = self.research.recommend(task_id=self.task_id, section=f"{section.get('number', '')} {section.get('title', '')}")
-        trend = self.research.recommend_literature_trend(task_id=self.task_id, section=f"{section.get('number', '')} {section.get('title', '')}")
-        candidates.extend(trend)
+        candidates = self.research.recommend(task_id=self.task_id, section=section_label)
+        candidates.extend(self.research.recommend_literature_trend(task_id=self.task_id, section=section_label))
+        ready = [item for item in candidates if item.get("status") == "ready" and item.get("kind") in {"table", "chart"}]
+        self._save_state(
+            status="running",
+            stage="visualization_planning",
+            message=f"已找到 {len(ready)} 个可插入的研究表图候选，正在生成正式正文块",
+            current_section_id=section_id,
+            visualization_plan={
+                "section_id": section_id,
+                "candidate_count": len(ready),
+                "candidate_kinds": [str(item.get("kind")) for item in ready],
+                "candidate_titles": [str(item.get("title") or "") for item in ready],
+            },
+        )
+        # Insert immediately after the chapter's generated body, rather than
+        # appending all research assets after the entire paper has finished.
+        latest = self.draft_service.load()
+        latest_section = next((item for item in latest.get("sections") or [] if item.get("id") == section_id), section)
+        insert_index = len(latest_section.get("paragraphs") or [])
         inserted_kinds: set[str] = set()
-        for candidate in candidates:
-            if candidate.get("status") != "ready":
-                continue
+        inserted: list[dict[str, str]] = []
+        failures: list[dict[str, str]] = []
+        for candidate in ready:
             kind = str(candidate.get("kind") or "")
-            if kind not in {"table", "chart"} or kind in inserted_kinds:
+            if kind in inserted_kinds:
                 continue
-            if not self._checkpoint("inserting_research", f"正在插入{('表格' if kind == 'table' else '图表')}到正文", section_id=section_id):
+            if not self._checkpoint("inserting_research", f"正在插入{('表格' if kind == 'table' else '图表')}到 {section_label}", section_id=section_id):
                 return
             try:
-                result = self.research.insert(candidate_id=str(candidate["id"]), section_id=section_id)
-                if self._record_insert(section_id, result):
+                result = self.research.insert(
+                    candidate_id=str(candidate["id"]),
+                    section_id=section_id,
+                    insert_index=insert_index,
+                )
+                block_id = self._record_insert(section_id, result)
+                block = ((result.get("inserted") or {}).get("block") or {})
+                if block_id:
                     inserted_kinds.add(kind)
-            except ValueError:
-                # No source-backed candidate should block the rest of the paper.
-                continue
+                    insert_index += 1
+                    label = f"表{block.get('table_number')}" if kind == "table" else f"图{block.get('figure_number')}"
+                    inserted.append({"kind": kind, "block_id": block_id, "label": label, "title": str(block.get("title") or candidate.get("title") or "")})
+                    self._save_state(
+                        status="running",
+                        stage="inserting_research",
+                        message=f"已插入{label}：{block.get('title') or candidate.get('title') or '研究内容'}",
+                        current_section_id=section_id,
+                        visualization_insertions=inserted,
+                    )
+            except ValueError as exc:
+                failures.append({"candidate_id": str(candidate.get("id") or ""), "reason": str(exc)})
         with self.draft_service.lock:
             draft = self.draft_service.load()
             state = dict(self._state(draft))
             state["research_section_ids"] = list(dict.fromkeys([*(state.get("research_section_ids") or []), section_id]))
             state["last_research_plan_id"] = plan.get("id")
+            state["visualization_insertions"] = inserted
+            if failures:
+                state["visualization_failures"] = failures
             draft[PIPELINE_KEY] = state
             self.draft_service.save(draft)
 

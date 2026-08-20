@@ -625,6 +625,19 @@ export interface FullPaperPipelineState {
   inserted_block_ids?: string[];
   progress?: number;
   error?: string;
+  visualization_plan?: {
+    section_id?: string;
+    candidate_count?: number;
+    candidate_kinds?: string[];
+    candidate_titles?: string[];
+  };
+  visualization_insertions?: Array<{
+    kind: "table" | "chart";
+    block_id: string;
+    label: string;
+    title: string;
+  }>;
+  visualization_failures?: Array<{ candidate_id: string; reason: string }>;
 }
 
 export interface DraftResearchVisualization {

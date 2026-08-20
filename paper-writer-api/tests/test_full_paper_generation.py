@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import zipfile
 
 from app.config import Settings
 from app.draft.service import DraftService
@@ -49,7 +50,7 @@ def fake_generate(service: DraftService):
     return generate
 
 
-def test_full_pipeline_inserts_source_backed_table_chart_and_references(tmp_path: Path, monkeypatch):
+def test_full_paper_generation_inserts_visualizations(tmp_path: Path, monkeypatch):
     settings = settings_for(tmp_path)
     draft = paper(settings)
     literature = LiteratureService(settings)
@@ -75,6 +76,27 @@ def test_full_pipeline_inserts_source_backed_table_chart_and_references(tmp_path
     assert table["table_number"] == 1
     assert chart["research_visualization"]["source_snapshot"]
     assert completed["full_paper_pipeline"]["status"] == "completed"
+    # 正文段落后立即内联研究表图；不等待全文结束再统一追加。
+    assert blocks.index(table) > 0
+    assert blocks.index(chart) > blocks.index(table)
+
+    # 新建 DraftService 模拟刷新/重新打开论文：同一正式 block 仍存在。
+    reopened = DraftService(TASK, settings.output_dir / TASK).load()
+    reopened_blocks = reopened["sections"][0]["paragraphs"]
+    assert any(block.get("id") == table["id"] and block.get("type") == "table" for block in reopened_blocks)
+    assert any(block.get("id") == chart["id"] and block.get("type") == "chart" for block in reopened_blocks)
+
+    # 正文 API 使用的草稿对象仍含有真实 FigureBlock（type=chart）与 TableBlock。
+    assert any(block.get("type") == "table" for block in reopened_blocks)
+    assert any(block.get("type") == "chart" for block in reopened_blocks)
+
+    files = draft.export()
+    docx = next(Path(path) for path in files if str(path).endswith(".docx"))
+    if not docx.is_absolute():
+        docx = draft.task_dir / docx
+    with zipfile.ZipFile(docx) as package:
+        assert any(name.startswith("word/media/") for name in package.namelist())
+        assert b"<w:tbl" in package.read("word/document.xml")
 
 
 def test_full_pipeline_pause_and_resume_state_is_persisted(tmp_path: Path):

@@ -69,6 +69,14 @@ def main() -> int:
         raise RuntimeError("全文流水线未产出正文内联表格、图表和交叉引用")
     if not chart.get("asset", {}).get("png_path") or not chart.get("figure_number") or not table.get("table_number"):
         raise RuntimeError("图表资产或正式编号不完整")
+    # Reload from disk to model a browser refresh/reopen. Both formal blocks must
+    # remain in the persisted draft, not only in a candidate or memory object.
+    reopened = DraftService(TASK, settings.output_dir / TASK).load()
+    reloaded_blocks = [block for section in reopened["sections"] for block in section["paragraphs"]]
+    if not any(block.get("id") == table.get("id") and block.get("type") == "table" for block in reloaded_blocks):
+        raise RuntimeError("刷新后 TableBlock 未保留在正文草稿中")
+    if not any(block.get("id") == chart.get("id") and block.get("type") == "chart" for block in reloaded_blocks):
+        raise RuntimeError("刷新后 FigureBlock 未保留在正文草稿中")
 
     files = service.export()
     docx_name = next((str(path) for path in files if str(path).lower().endswith(".docx")), "")
@@ -79,11 +87,14 @@ def main() -> int:
         raise RuntimeError("DOCX 未生成")
     with zipfile.ZipFile(docx) as package:
         media = [name for name in package.namelist() if name.startswith("word/media/")]
+        document_xml = package.read("word/document.xml")
     if not media:
         raise RuntimeError("DOCX 未包含图表媒体资产")
+    if b"<w:tbl" not in document_xml:
+        raise RuntimeError("DOCX 未包含由 TableBlock 导出的原生表格")
 
     print("FULL_PAPER_E2E_OK")
-    print(f"sources={len(saved)} table={table['table_number']} chart={chart['figure_number']} media={len(media)}")
+    print(f"sources={len(saved)} table={table['table_number']} chart={chart['figure_number']} media={len(media)} native_table=yes")
     print(f"docx={docx}")
     return 0
 
