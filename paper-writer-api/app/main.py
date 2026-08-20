@@ -28,6 +28,8 @@ from app.api.research_impact import router as research_impact_router
 from app.api.hypotheses import router as hypotheses_router
 from app.api.literature import router as literature_router
 from app.api.discussion_writer import router as discussion_writer_router
+from app.api.research_workspace import router as research_workspace_router
+from app.api.research_workspace_insert import router as research_workspace_insert_router
 
 from app.config import settings
 from app.db import init_db
@@ -117,6 +119,8 @@ app.include_router(research_impact_router)
 app.include_router(hypotheses_router)
 app.include_router(literature_router)
 app.include_router(discussion_writer_router)
+app.include_router(research_workspace_router)
+app.include_router(research_workspace_insert_router)
 
 
 if __name__ == "__main__":

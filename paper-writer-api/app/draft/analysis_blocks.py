@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.config import settings
+from app.config import Settings, settings
 from app.draft.chart_runtime import normalize_appearance, now, render_chart_assets
 from app.draft.service import DraftService
 
@@ -103,8 +103,8 @@ def _table_specs(analysis: dict[str, Any], result: dict[str, Any]) -> list[tuple
     return specs
 
 
-def _insert_table(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str) -> list[dict[str, Any]]:
-    service = DraftService(task_id, settings.output_dir / task_id)
+def _insert_table(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, storage_settings: Settings = settings) -> list[dict[str, Any]]:
+    service = DraftService(task_id, storage_settings.output_dir / task_id)
     reference = _reference(analysis, result)
     inserted: list[dict[str, Any]] = []
     with service.lock:
@@ -122,7 +122,7 @@ def _insert_table(task_id: str, analysis: dict[str, Any], result: dict[str, Any]
     return inserted
 
 
-def _insert_correlation_chart(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str) -> dict[str, Any]:
+def _insert_correlation_chart(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, storage_settings: Settings = settings) -> dict[str, Any]:
     payload = result.get("result") or {}
     method = str(payload.get("method") or "")
     if method not in {"pearson", "spearman"}:
@@ -130,7 +130,7 @@ def _insert_correlation_chart(task_id: str, analysis: dict[str, Any], result: di
     pairs = payload.get("pairs") or []
     if len(pairs) < 3:
         raise ValueError("有效观测不足，无法生成相关散点图")
-    service = DraftService(task_id, settings.output_dir / task_id)
+    service = DraftService(task_id, storage_settings.output_dir / task_id)
     reference = _reference(analysis, result)
     chart_id = f"chart_analysis_{uuid.uuid4().hex[:12]}"
     x_name, y_name = str(payload.get("x") or "X"), str(payload.get("y") or "Y")
@@ -169,14 +169,14 @@ def _insert_correlation_chart(task_id: str, analysis: dict[str, Any], result: di
     return block
 
 
-def _insert_group_boxplot(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str) -> dict[str, Any]:
+def _insert_group_boxplot(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, storage_settings: Settings = settings) -> dict[str, Any]:
     payload = result.get("result") or {}
     if payload.get("analysis_type") != "independent_t" and payload.get("method") != "anova":
         raise ValueError("当前分析结果不支持组间箱线图")
     groups = payload.get("group_statistics") or []
     if len(groups) < 2:
         raise ValueError("有效分组不足，无法生成箱线图")
-    service = DraftService(task_id, settings.output_dir / task_id)
+    service = DraftService(task_id, storage_settings.output_dir / task_id)
     chart_id = f"chart_analysis_{uuid.uuid4().hex[:12]}"
     method = "独立样本 t 检验" if payload.get("analysis_type") == "independent_t" else "单因素 ANOVA"
     spec = {
@@ -198,7 +198,7 @@ def _insert_group_boxplot(task_id: str, analysis: dict[str, Any], result: dict[s
     return block
 
 
-def _insert_regression_chart(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, chart_type: str) -> dict[str, Any]:
+def _insert_regression_chart(task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, chart_type: str, storage_settings: Settings = settings) -> dict[str, Any]:
     payload = result.get("result") or {}
     if payload.get("method") != "ols":
         raise ValueError("当前分析结果不支持回归图表")
@@ -208,7 +208,7 @@ def _insert_regression_chart(task_id: str, analysis: dict[str, Any], result: dic
     labels = {"actual_predicted": "实际值与预测值散点图", "residual": "残差诊断图", "coefficient": "回归系数图"}
     if chart_type not in labels:
         raise ValueError("不支持的回归图表类型")
-    service = DraftService(task_id, settings.output_dir / task_id)
+    service = DraftService(task_id, storage_settings.output_dir / task_id)
     chart_id = f"chart_analysis_{uuid.uuid4().hex[:12]}"
     if chart_type == "actual_predicted":
         kind, categories, series, appearance = "scatter", [_fmt(item.get("predicted"), 8) for item in points], [{"name": "实际值", "values": [float(item["actual"]) for item in points], "axis": "left"}], {"template": "academic", "legend": False, "x_label": "Predicted", "y_label": "Actual"}
@@ -228,18 +228,19 @@ def _insert_regression_chart(task_id: str, analysis: dict[str, Any], result: dic
     return block
 
 
-def insert_analysis_result(*, task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, artifact: str) -> dict[str, Any]:
+def insert_analysis_result(*, task_id: str, analysis: dict[str, Any], result: dict[str, Any], section_id: str, artifact: str, storage_settings: Settings | None = None) -> dict[str, Any]:
     if result.get("status") != "ready":
         raise ValueError("仅可插入已成功运行的 AnalysisResult")
+    storage = storage_settings or settings
     if artifact == "table":
-        return {"type": "table", "blocks": _insert_table(task_id, analysis, result, section_id)}
+        return {"type": "table", "blocks": _insert_table(task_id, analysis, result, section_id, storage)}
     if artifact in {"chart", "actual_predicted", "residual", "coefficient"}:
         payload = result.get("result") or {}
         if payload.get("method") == "ols":
-            block = _insert_regression_chart(task_id, analysis, result, section_id, "actual_predicted" if artifact == "chart" else artifact)
+            block = _insert_regression_chart(task_id, analysis, result, section_id, "actual_predicted" if artifact == "chart" else artifact, storage)
         elif payload.get("method") in {"pearson", "spearman"}:
-            block = _insert_correlation_chart(task_id, analysis, result, section_id)
+            block = _insert_correlation_chart(task_id, analysis, result, section_id, storage)
         else:
-            block = _insert_group_boxplot(task_id, analysis, result, section_id)
+            block = _insert_group_boxplot(task_id, analysis, result, section_id, storage)
         return {"type": "chart", "block": block}
     raise ValueError("不支持的分析结果插入类型")
