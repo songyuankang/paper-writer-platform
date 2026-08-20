@@ -1640,3 +1640,7 @@ export async function explainAnalysisResult(input: { analysis_id: string; analys
   if (!res.ok) throw await toError(res);
   return res.json();
 }
+
+export interface ResearchFinding { id:string; task_id:string; analysis_id:string; analysis_result_id:string; explanation_id:string; dataset_id:string; dataset_version_id:string; data_fingerprint:string; title:string; paragraphs:string[]; table_references:Array<{id:string;label:string;title:string}>; figure_references:Array<{id:string;label:string;title:string}>; style:Record<string,string>; status:string; created_at:string; }
+export async function createResearchFinding(input:{task_id:string;analysis_id:string;analysis_result_id:string;explanation_id:string;style:Record<string,string>}):Promise<ResearchFinding>{ const r=await apiFetch(`${API_BASE}/api/research-findings`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)}); if(!r.ok) throw await toError(r); return r.json(); }
+export async function insertResearchFinding(id:string,section_id:string):Promise<{block:unknown}>{const r=await apiFetch(`${API_BASE}/api/research-findings/${id}/insert`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({section_id})});if(!r.ok) throw await toError(r);return r.json();}
