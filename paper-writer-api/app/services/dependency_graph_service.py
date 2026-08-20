@@ -196,6 +196,30 @@ class DependencyGraphService:
                 continue
         return records
 
+    def _read_research_evidence(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "research_visualizations" / "evidence"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("re_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
+    def _read_visualization_candidates(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "research_visualizations" / "candidates"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("rv_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
     @staticmethod
     def _block_type(block: dict[str, Any]) -> str | None:
         if block.get("type") == "table":
@@ -321,6 +345,36 @@ class DependencyGraphService:
             for evidence_id in snapshot.get("literature_evidence_ids") or []:
                 links.append(self._link(task_id, "discussion_draft", discussion["id"], "literature_evidence", str(evidence_id), "references"))
 
+        # Phase 9 records stay authoritative in research_visualizations.  The
+        # graph stores only edges so provenance changes can reuse the existing
+        # impact traversal rather than creating a second dependency system.
+        research_evidence = self._read_research_evidence(task_id)
+        candidates = self._read_visualization_candidates(task_id)
+        for evidence in research_evidence:
+            source_type = str(evidence.get("source_type") or "")
+            source_id = str(evidence.get("source_id") or "")
+            if source_type == "literature" and source_id:
+                links.append(self._link(task_id, "literature", source_id, "research_evidence", evidence["id"], "derived_from"))
+            elif source_type == "dataset" and source_id:
+                links.append(self._link(task_id, "dataset", source_id, "research_evidence", evidence["id"], "derived_from"))
+        for candidate in candidates:
+            for evidence_id in candidate.get("evidence_ids") or []:
+                links.append(self._link(task_id, "research_evidence", str(evidence_id), "visualization_candidate", candidate["id"], "renders"))
+            for source in candidate.get("source_snapshot") or []:
+                source_type = str(source.get("source_type") or "")
+                source_id = str(source.get("source_id") or "")
+                if source_type == "literature" and source_id:
+                    links.append(self._link(task_id, "literature", source_id, "visualization_candidate", candidate["id"], "references"))
+                elif source_type == "dataset" and source_id:
+                    links.append(self._link(task_id, "dataset", source_id, "visualization_candidate", candidate["id"], "references", source.get("dataset_version")))
+            for section in walk_sections(draft.get("sections") or []):
+                for block in section.get("paragraphs") or []:
+                    provenance = block.get("research_visualization") or {}
+                    if str(provenance.get("candidate_id") or "") == str(candidate.get("id") or ""):
+                        artifact = self._block_type(block)
+                        if artifact and block.get("id"):
+                            links.append(self._link(task_id, "visualization_candidate", candidate["id"], artifact, str(block["id"]), "inserts"))
+
         # Deterministic de-duplication makes repeated lazy rebuilds idempotent.
         unique = {item["id"]: item for item in links}
         ordered = sorted(unique.values(), key=lambda item: (item["source_type"], item["source_id"], item["target_type"], item["target_id"], item["relation"]))
@@ -360,6 +414,8 @@ class DependencyGraphService:
         literature_evidence = {item["id"]: item for item in self._read_literature_evidence(set(literature))}
         citations = {item["id"]: item for item in self._read_citations(task_id)}
         discussion_drafts = {item["id"]: item for item in self._read_discussion_drafts(task_id)}
+        research_evidence = {item["id"]: item for item in self._read_research_evidence(task_id)}
+        visualization_candidates = {item["id"]: item for item in self._read_visualization_candidates(task_id)}
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for dataset in self.datasets.list_datasets(task_id):
             try:
@@ -381,6 +437,40 @@ class DependencyGraphService:
             record = dict(item)
             if str(item.get("literature_id")) not in literature or literature[str(item.get("literature_id"))].get("status") == "deleted": record["status"] = "broken"
             records[("citation", item["id"])] = record
+        for item in research_evidence.values():
+            record = dict(item)
+            if record.get("source_type") == "literature":
+                source = literature.get(str(record.get("source_id") or ""))
+                if not source or source.get("status") == "deleted":
+                    record["status"] = "broken"
+            records[("research_evidence", item["id"])] = record
+        for item in visualization_candidates.values():
+            record = dict(item)
+            candidate_status = str(record.get("status") or "ready")
+            for source in record.get("source_snapshot") or []:
+                if source.get("source_type") == "literature":
+                    literature_source = literature.get(str(source.get("source_id") or ""))
+                    if not literature_source or literature_source.get("status") == "deleted":
+                        candidate_status = "broken"
+                        break
+                    if source.get("source_updated_at") and source.get("source_updated_at") != literature_source.get("updated_at"):
+                        candidate_status = "stale"
+                elif source.get("source_type") == "dataset":
+                    latest = self._latest_version(str(source.get("source_id") or ""))
+                    if latest is None:
+                        candidate_status = "broken"
+                        break
+                    if int(source.get("dataset_version") or 0) < latest:
+                        candidate_status = "stale"
+            for evidence_id in record.get("evidence_ids") or []:
+                evidence = research_evidence.get(str(evidence_id))
+                if not evidence or evidence.get("verification_status") == "broken":
+                    candidate_status = "broken"
+                    break
+                if evidence.get("verification_status") in {"pending", "conflict"} and candidate_status != "broken":
+                    candidate_status = "stale"
+            record["status"] = candidate_status
+            records[("visualization_candidate", item["id"])] = record
         for item in discussion_drafts.values():
             record = dict(item); snapshot = item.get("source_snapshot") or {}
             stale = False

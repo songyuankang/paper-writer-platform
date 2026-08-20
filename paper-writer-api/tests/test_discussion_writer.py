@@ -100,7 +100,9 @@ def test_user_note_source_level_is_disclosed(tmp_path):
     assert "根据用户记录" in draft["sections"]["literature_comparison"]["paragraphs"][0]["text"]
 
 
-def test_model_unavailable_uses_rule_fallback(tmp_path):
+def test_model_unavailable_uses_rule_fallback(tmp_path, monkeypatch):
+    from app.services import discussion_writer_service as writer_module
+    monkeypatch.setattr(writer_module, "resolve_model", lambda _model_id: None)
     _,draft,_,_=generate(tmp_path,"hypothesis_discussion",model_id=None)
     assert draft["provider"]=="rule_based_fallback" and draft["sections"]["hypothesis_discussion"]["paragraphs"]
 

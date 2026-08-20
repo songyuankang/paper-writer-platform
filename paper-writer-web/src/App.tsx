@@ -27,6 +27,7 @@ import ResearchDiscussion from "./pages/ResearchDiscussion";
 import ResearchLiterature from "./pages/ResearchLiterature";
 import ResearchDiscussionWriter from "./pages/ResearchDiscussionWriter";
 import ResearchWorkspace from "./pages/ResearchWorkspace";
+import ResearchVisualizations from "./pages/ResearchVisualizations";
 
 function CreateIndexRedirect() {
   const location = useLocation();
@@ -58,6 +59,8 @@ export default function App() {
         <Route path="/format/:taskId" element={<FormatPage />} />
         <Route path="/preview/:taskId" element={<PreviewPage />} />
         <Route path="/lab/:taskId" element={<VisualizationLab />} />
+        <Route path="/research/visualizations" element={<ResearchVisualizations />} />
+        <Route path="/research/:taskId/visualizations" element={<ResearchVisualizations />} />
         <Route path="/research/:taskId" element={<ResearchWorkspace />} />
         <Route path="/research/data" element={<ResearchData />} />
         <Route path="/research/analysis" element={<ResearchAnalysis />} />

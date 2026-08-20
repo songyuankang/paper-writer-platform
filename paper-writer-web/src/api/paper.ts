@@ -1,5 +1,7 @@
 /** paper-writer-api 客户端：只负责调用后端接口，不包含任何生成逻辑。 */
 
+import { normalizeApiBase } from "./apiUrl";
+
 export interface GenerateParams {
   title: string;
   major: string;
@@ -115,10 +117,13 @@ export interface TaskInfo {
 /**
  * 后端地址来自 .env 的 VITE_API_URL。
  * 留空时使用相对路径 /api，开发模式由 Vite 代理转发到 paper-writer-api。
+ * 统一规范化会移除环境变量中的空白和尾部斜杠。
  */
-export const API_BASE = (
-  (import.meta.env.VITE_API_URL as string | undefined) ?? ""
-).replace(/\/+$/, "");
+export { normalizeApiBase } from "./apiUrl";
+
+export const API_BASE = normalizeApiBase(
+  import.meta.env.VITE_API_URL as string | undefined,
+);
 
 /** 可选的部署认证令牌；留空时保持本机开发流程完全不变。 */
 export const API_AUTH_TOKEN =
@@ -1723,3 +1728,182 @@ export async function getResearchWorkspace(taskId:string):Promise<ResearchWorksp
 export async function getResearchWorkflowTemplates():Promise<ResearchWorkflowTemplate[]>{const r=await apiFetch(`${API_BASE}/api/research/workspace/templates`);if(!r.ok)throw await toError(r);return (await r.json()).templates;}
 export async function previewWorkspaceInsert(input:WorkspaceInsertInput):Promise<WorkspaceInsertPreview>{const r=await apiFetch(`${API_BASE}/api/research/workspace/insert-preview`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)});if(!r.ok)throw await toError(r);return r.json();}
 export async function confirmWorkspaceInsert(input:WorkspaceInsertInput):Promise<{preview:WorkspaceInsertPreview["preview"];inserted:unknown}>{const r=await apiFetch(`${API_BASE}/api/research/workspace/insert`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...input,confirmed:true})});if(!r.ok)throw await toError(r);return r.json();}
+
+
+export type EvidenceVerificationStatus =
+  | "verified"
+  | "pending"
+  | "conflict"
+  | "broken";
+
+export interface ResearchSearchPlan {
+  id: string;
+  task_id: string;
+  topic: string;
+  chapter: string;
+  research_question: string;
+  queries: string[];
+  providers: string[];
+  provider: "configured_model" | "rule_fallback";
+  status: string;
+  created_at: string;
+  updated_at: string;
+  search_results?: Literature[];
+  saved_literature_count?: number;
+}
+
+export interface ResearchEvidence {
+  id: string;
+  task_id: string;
+  subject: string;
+  metric: string;
+  value: number;
+  unit: string;
+  canonical_value?: number;
+  canonical_unit?: string;
+  source_type: string;
+  source_id: string;
+  source_title: string;
+  source_location: string;
+  source_quote: string;
+  year?: number | null;
+  device_model?: string;
+  test_condition?: string;
+  verification_status: EvidenceVerificationStatus;
+  verification_issues?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResearchVisualizationCandidate {
+  id: string;
+  task_id: string;
+  kind: "table" | "chart" | "dataset_chart";
+  table_type?: string;
+  chart_kind?: string;
+  title: string;
+  reason: string;
+  status: "ready" | "pending" | "stale" | "broken" | "inserted";
+  requires_confirmation: boolean;
+  evidence_ids?: string[];
+  source_snapshot?: Array<{
+    source_type: string;
+    source_id: string;
+    source_title: string;
+    verification_status: string;
+  }>;
+  table_spec?: {
+    title: string;
+    headers: string[];
+    rows: Array<Array<string | number>>;
+  };
+  chart?: {
+    chart_id: string;
+    dataset_id: string;
+    dataset_version: number;
+    asset?: { png_path?: string; svg_path?: string };
+  };
+  dataset_id?: string;
+  dataset_version?: number;
+  inserted_block_ids?: string[];
+}
+
+export async function createResearchVisualizationPlan(payload: {
+  task_id: string;
+  topic: string;
+  chapter?: string;
+  research_question?: string;
+  model_id?: string;
+}): Promise<{ plan: ResearchSearchPlan }> {
+  return postJson("/api/research/visualizations/plan", payload);
+}
+
+export async function getResearchVisualizationPlan(taskId: string): Promise<{ plan: ResearchSearchPlan }> {
+  const res = await apiFetch(`${API_BASE}/api/research/visualizations/${encodeURIComponent(taskId)}/plan`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function searchResearchVisualizationSources(payload: {
+  task_id: string;
+  limit?: number;
+}): Promise<{ plan: ResearchSearchPlan; results: Literature[]; saved_literature: Literature[] }> {
+  return postJson("/api/research/visualizations/search", payload);
+}
+
+export async function saveResearchVisualizationSources(payload: {
+  task_id: string;
+  sources: Array<Record<string, unknown>>;
+}): Promise<{ literature: Literature[] }> {
+  return postJson("/api/research/visualizations/sources", payload);
+}
+
+export async function listResearchEvidence(taskId: string): Promise<{ evidence: ResearchEvidence[] }> {
+  const res = await apiFetch(`${API_BASE}/api/research/visualizations/${encodeURIComponent(taskId)}/evidence`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function extractResearchEvidence(payload: {
+  task_id: string;
+  literature_ids?: string[];
+}): Promise<{ evidence: ResearchEvidence[] }> {
+  return postJson("/api/research/visualizations/extract", payload);
+}
+
+export async function addManualResearchEvidence(payload: {
+  task_id: string;
+  subject: string;
+  metric: string;
+  value: number;
+  unit: string;
+  source_title: string;
+  source_location: string;
+  source_quote: string;
+  source_type?: string;
+  source_id?: string;
+  year?: number;
+  device_model?: string;
+  test_condition?: string;
+}): Promise<{ evidence: ResearchEvidence }> {
+  return postJson("/api/research/visualizations/evidence/manual", payload);
+}
+
+export async function verifyResearchEvidence(payload: {
+  task_id: string;
+  evidence_ids?: string[];
+}): Promise<{ evidence: ResearchEvidence[] }> {
+  return postJson("/api/research/visualizations/verify", payload);
+}
+
+export async function recommendResearchVisualizations(payload: {
+  task_id: string;
+  section?: string;
+  evidence_ids?: string[];
+  dataset_id?: string;
+  dataset_version?: number;
+}): Promise<{ candidates: ResearchVisualizationCandidate[] }> {
+  return postJson("/api/research/visualizations/recommend", payload);
+}
+
+export async function listResearchVisualizationCandidates(taskId: string): Promise<{ candidates: ResearchVisualizationCandidate[] }> {
+  const res = await apiFetch(`${API_BASE}/api/research/visualizations/${encodeURIComponent(taskId)}/candidates`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function previewResearchVisualizationCandidate(candidateId: string): Promise<{
+  requires_confirmation: boolean;
+  candidate: ResearchVisualizationCandidate;
+}> {
+  const res = await apiFetch(`${API_BASE}/api/research/visualizations/candidate/${encodeURIComponent(candidateId)}/preview`);
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function insertResearchVisualizationCandidate(candidateId: string, payload: {
+  section_id: string;
+  confirmed: boolean;
+}): Promise<Record<string, unknown>> {
+  return postJson(`/api/research/visualizations/candidate/${encodeURIComponent(candidateId)}/insert`, payload);
+}
