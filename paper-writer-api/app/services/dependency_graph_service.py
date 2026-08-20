@@ -172,6 +172,18 @@ class DependencyGraphService:
         try: return (json.loads(path.read_text(encoding="utf-8")) or {}).get("citations") or []
         except json.JSONDecodeError: return []
 
+    def _read_discussion_drafts(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.db_path.parent / "discussion_drafts"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("dd_*.json") if directory.exists() else []:
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    records.append(item)
+            except json.JSONDecodeError:
+                continue
+        return records
+
     def _read_frameworks(self, task_id: str) -> list[dict[str, Any]]:
         directory = self.settings.db_path.parent / "discussion_frameworks"
         records: list[dict[str, Any]] = []
@@ -293,6 +305,22 @@ class DependencyGraphService:
             if citation.get("literature_id"):
                 links.append(self._link(task_id, "citation", str(citation["id"]), "literature", str(citation["literature_id"]), "references"))
 
+        # DiscussionDraft stores only a frozen source snapshot and evidence IDs.
+        # It deliberately reuses the existing graph rather than creating a second
+        # provenance index for generated discussion prose.
+        for discussion in self._read_discussion_drafts(task_id):
+            links.append(self._link(task_id, "discussion_framework", str(discussion.get("framework_id") or ""), "discussion_draft", discussion["id"], "derived_from"))
+            snapshot = discussion.get("source_snapshot") or {}
+            for result_id in snapshot.get("analysis_result_ids") or []:
+                links.append(self._link(task_id, "discussion_draft", discussion["id"], "analysis_result", str(result_id), "references"))
+            for evaluation_id in (discussion.get("fact_package") or {}).get("evaluations") or []:
+                if evaluation_id.get("id"):
+                    links.append(self._link(task_id, "discussion_draft", discussion["id"], "hypothesis_evaluation", str(evaluation_id["id"]), "references"))
+            for finding_id in discussion.get("finding_ids") or []:
+                links.append(self._link(task_id, "discussion_draft", discussion["id"], "finding", str(finding_id), "references"))
+            for evidence_id in snapshot.get("literature_evidence_ids") or []:
+                links.append(self._link(task_id, "discussion_draft", discussion["id"], "literature_evidence", str(evidence_id), "references"))
+
         # Deterministic de-duplication makes repeated lazy rebuilds idempotent.
         unique = {item["id"]: item for item in links}
         ordered = sorted(unique.values(), key=lambda item: (item["source_type"], item["source_id"], item["target_type"], item["target_id"], item["relation"]))
@@ -331,6 +359,7 @@ class DependencyGraphService:
         literature = {item["id"]: item for item in self._read_literature(task_id)}
         literature_evidence = {item["id"]: item for item in self._read_literature_evidence(set(literature))}
         citations = {item["id"]: item for item in self._read_citations(task_id)}
+        discussion_drafts = {item["id"]: item for item in self._read_discussion_drafts(task_id)}
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for dataset in self.datasets.list_datasets(task_id):
             try:
@@ -352,6 +381,22 @@ class DependencyGraphService:
             record = dict(item)
             if str(item.get("literature_id")) not in literature or literature[str(item.get("literature_id"))].get("status") == "deleted": record["status"] = "broken"
             records[("citation", item["id"])] = record
+        for item in discussion_drafts.values():
+            record = dict(item); snapshot = item.get("source_snapshot") or {}
+            stale = False
+            for result_id in snapshot.get("analysis_result_ids") or []:
+                result = results.get(str(result_id))
+                if not result:
+                    stale = True; continue
+                latest = self._latest_version(str(result.get("dataset_id")))
+                if latest is None or int(result.get("dataset_version") or 0) < latest:
+                    stale = True
+            for evidence_id in snapshot.get("literature_evidence_ids") or []:
+                evidence = literature_evidence.get(str(evidence_id))
+                source = literature.get(str((evidence or {}).get("literature_id")))
+                if not evidence or not source or source.get("status") == "deleted": stale = True
+            if stale: record["status"] = "stale"
+            records[("discussion_draft", item["id"])] = record
         for item in frameworks.values():
             record = dict(item)
             if any(evaluations.get(str(evaluation_id), {}).get("dataset_version") and self._latest_version(str(evaluations[str(evaluation_id)].get("dataset_id"))) and int(evaluations[str(evaluation_id)].get("dataset_version")) < int(self._latest_version(str(evaluations[str(evaluation_id)].get("dataset_id"))) or 0) for evaluation_id in item.get("evaluation_ids") or []):

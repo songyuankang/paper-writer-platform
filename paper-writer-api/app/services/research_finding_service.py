@@ -55,6 +55,14 @@ class ResearchFindingService:
   if explanation.get("limitations"): paragraphs.append("结果解释需结合以下限制："+"；".join(explanation["limitations"]) + "。")
   finding={"id":f"rf_{uuid.uuid4().hex[:16]}","task_id":task_id,"analysis_id":analysis_id,"analysis_result_id":analysis_result_id,"explanation_id":explanation_id,"dataset_id":result["dataset_id"],"dataset_version":result["dataset_version"],"dataset_version_id":result["dataset_version_id"],"data_fingerprint":result["data_fingerprint"],"title":f"{analysis.get('name') or '统计分析'}结果","paragraphs":paragraphs,"table_references":tables,"figure_references":figures,"research_object_ids":[item["research_object_id"] for item in [*tables,*figures] if item.get("research_object_id")],"style":{"paper_style":style.get("paper_style") or "undergraduate","tone":style.get("tone") or "formal","length":mode},"fact_package":{"analysis":{"type":analysis["type"],"variables":analysis.get("variables"),"parameters":analysis.get("parameters")},"statistics":facts,"explanation":explanation.get("interpretation",[]),"tables":tables,"figures":figures},"provider":"controlled_rule_renderer","status":"draft","created_at":now()}
   self._path(finding["id"]).write_text(json.dumps(finding,ensure_ascii=False,indent=2),encoding="utf-8"); return finding
+ def list(self,task_id:str):
+  values=[]
+  for path in self.root.glob("rf_*.json"):
+   try:
+    item=json.loads(path.read_text(encoding="utf-8"))
+    if item.get("task_id")==task_id: values.append(item)
+   except json.JSONDecodeError: continue
+  return sorted(values,key=lambda item:item.get("created_at") or "",reverse=True)
  def get(self,fid:str):
   p=self._path(fid)
   if not p.is_file(): raise ValueError("未找到 ResearchFinding")

@@ -7,6 +7,10 @@ class Generate(BaseModel):
  task_id:str=Field(...,min_length=32,max_length=32); analysis_id:str; analysis_result_id:str; explanation_id:str; style:dict=Field(default_factory=dict)
 class Insert(BaseModel): section_id:str=Field(...,min_length=1)
 def svc(): return ResearchFindingService(settings)
+@router.get("")
+def list_findings(task_id:str):
+ try: return {"findings":svc().list(task_id)}
+ except ValueError as exc: raise HTTPException(status_code=422,detail=str(exc)) from exc
 @router.post("")
 def generate(body:Generate):
  try: return svc().generate(task_id=body.task_id,analysis_id=body.analysis_id,analysis_result_id=body.analysis_result_id,explanation_id=body.explanation_id,style=body.style)

@@ -294,6 +294,17 @@ class HypothesisService:
         self._save(self._framework_path(framework["id"]), framework)
         return framework
 
+    def list_frameworks(self, task_id: str) -> list[dict[str, Any]]:
+        task_id = _task(task_id); values: list[dict[str, Any]] = []
+        for path in self.framework_root.glob("df_*.json"):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                if item.get("task_id") == task_id:
+                    values.append(self.get_framework(str(item.get("id"))))
+            except (ValueError, json.JSONDecodeError):
+                continue
+        return sorted(values, key=lambda item: item.get("created_at") or "", reverse=True)
+
     def get_framework(self, framework_id: str) -> dict[str, Any]:
         path = self._framework_path(framework_id)
         if not path.is_file(): raise ValueError("未找到 Discussion Framework")

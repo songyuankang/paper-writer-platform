@@ -105,6 +105,14 @@ def create_discussion_framework(payload: FrameworkInput):
         raise _problem(exc) from exc
 
 
+@router.get("/api/research/discussion/frameworks")
+def list_discussion_frameworks(task_id: str = Query(..., min_length=1)):
+    try:
+        return {"frameworks": _service().list_frameworks(task_id)}
+    except ValueError as exc:
+        raise _problem(exc) from exc
+
+
 @router.get("/api/research/discussion/framework/{framework_id}")
 def get_discussion_framework(framework_id: str):
     try:

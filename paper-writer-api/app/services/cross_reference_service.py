@@ -122,8 +122,13 @@ class CrossReferenceService:
         return result
 
     def _list_resolved(self, task_id: str, persist: bool = True) -> list[dict[str, Any]]:
-        index = self._object_index(task_id)
         raw = self._read(task_id)
+        # Pure document exports without CrossReference records must not force a
+        # second registry lookup.  This keeps isolated DraftService task folders
+        # compatible while preserving normal dynamic numbering when records exist.
+        if not raw:
+            return []
+        index = self._object_index(task_id)
         resolved = [self._resolved(item, index) for item in raw]
         if persist and resolved != raw:
             # display_label is only a cache; target_object_id is intentionally unchanged.

@@ -25,6 +25,7 @@ import ResearchAssistant from "./pages/ResearchAssistant";
 import ResearchResults from "./pages/ResearchResults";
 import ResearchDiscussion from "./pages/ResearchDiscussion";
 import ResearchLiterature from "./pages/ResearchLiterature";
+import ResearchDiscussionWriter from "./pages/ResearchDiscussionWriter";
 
 function CreateIndexRedirect() {
   const location = useLocation();
@@ -60,7 +61,8 @@ export default function App() {
         <Route path="/research/analysis" element={<ResearchAnalysis />} />
         <Route path="/research/assistant" element={<ResearchAssistant />} />
         <Route path="/research/results" element={<ResearchResults />} />
-        <Route path="/research/discussion" element={<ResearchDiscussion />} />
+        <Route path="/research/discussion" element={<ResearchDiscussionWriter />} />
+        <Route path="/research/discussion/hypotheses" element={<ResearchDiscussion />} />
         <Route path="/research/literature" element={<ResearchLiterature />} />
         <Route path="/research/literature/:id" element={<ResearchLiterature />} />
         <Route path="*" element={<Navigate to="/" replace />} />

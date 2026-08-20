@@ -935,6 +935,21 @@ class DraftService:
         cross_reference_text = CrossReferenceService(storage_settings).render_draft_text(self.task_id, draft)
         literature_service = LiteratureService(storage_settings)
         literature_citation_text = literature_service.render_draft_text(self.task_id, draft)
+        cross_reference_records = {item["id"]: item for item in CrossReferenceService(storage_settings).list(self.task_id)}
+        literature_citation_records = {item["id"]: item for item in literature_service.citations(self.task_id)}
+        def render_structured_text(block: dict) -> str:
+            content = block.get("content")
+            if not isinstance(content, list):
+                return str(block.get("text") or "")
+            fragments: list[str] = []
+            for item in content:
+                if item.get("type") == "text":
+                    fragments.append(str(item.get("text") or ""))
+                elif item.get("type") == "cross_reference":
+                    fragments.append(str((cross_reference_records.get(str(item.get("reference_id"))) or {}).get("resolved_label") or "[引用对象不存在]"))
+                elif item.get("type") == "literature_citation":
+                    fragments.append(str((literature_citation_records.get(str(item.get("citation_id"))) or {}).get("resolved_label") or "[引用文献不存在]"))
+            return "".join(fragments)
         # Phase 6C remains read-only: export records stale-source warnings but
         # never silently reruns analyses, changes results or rewrites findings.
         impact_warnings = (
@@ -955,12 +970,12 @@ class DraftService:
                 # Structured draft block export: editor and Word share the same stored block.
                 kind = p.get("type", "paragraph")
                 if kind == "literature_citation":
-                    text = literature_citation_text.get(str(p.get("id")), str(p.get("text") or "")).strip()
+                    text = literature_citation_text.get(str(p.get("id")), render_structured_text(p)).strip()
                     if text:
                         spec_sections.append({"type": "p", "text": text})
                     continue
-                if kind == "cross_reference" or isinstance(p.get("content"), list):
-                    text = cross_reference_text.get(str(p.get("id")), str(p.get("text") or "")).strip()
+                if kind == "cross_reference" or kind == "discussion" or isinstance(p.get("content"), list):
+                    text = render_structured_text(p).strip()
                     if text:
                         spec_sections.append({"type": "p", "text": text})
                     continue
