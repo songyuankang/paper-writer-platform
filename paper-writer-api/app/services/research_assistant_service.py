@@ -80,9 +80,22 @@ class ResearchAssistantService:
         for item in payload.get("recommended_methods") or []:
             method = str(item.get("type") or "")
             names = [str(value) for value in item.get("variables") or payload.get("required_variables") or []]
+            # Pearson versus Spearman is an inferential choice.  A model may
+            # propose either valid type from the same numeric schema, but must not
+            # override the explicit ordinal/non-normal semantic rule selected by
+            # the deterministic fallback simply because both pass type validation.
+            fallback_method = str((fallback.get("recommended_methods") or [{}])[0].get("type") or "")
+            if method in {"pearson", "spearman"} and fallback_method in {"pearson", "spearman"}:
+                method = fallback_method
             if method in ALLOWED_METHODS and self._valid_variables(method, names, profile):
                 methods.append({"type": method, "confidence": str(item.get("confidence") or "medium")[:24], "reason": str(item.get("reason") or "变量类型与研究问题匹配。")[:500], "variables": names})
         if not methods: return fallback
+        # The rule result is the deterministic, semantically scoped primary
+        # recommendation.  A configured model can enrich valid alternatives but
+        # cannot replace that primary with a merely type-compatible method.
+        primary = (fallback.get("recommended_methods") or [{}])[0]
+        if primary and methods[0].get("type") != primary.get("type"):
+            methods.insert(0, primary)
         allowed = {item["name"] for item in profile}
         roles = [{"variable": str(item.get("variable")), "role": str(item.get("role") or "measure")} for item in payload.get("variable_roles") or [] if str(item.get("variable")) in allowed]
         charts = [{"type": _METHOD_CHART[methods[0]["type"]], "reason": str((payload.get("recommended_charts") or [{}])[0].get("reason") or "推荐图表与当前方法匹配。")[:500]}]

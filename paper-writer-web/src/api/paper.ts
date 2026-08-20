@@ -616,7 +616,11 @@ export interface DraftParagraph {
   chart_spec?: DraftChartSpec;
   asset?: DraftChartAsset;
   source_ids?: string[];
-  figure_number?: string;
+  /** 后端领域服务持久化的正式编号；前端不得由位置推断。 */
+  figure_number?: number;
+  table_number?: number;
+  source?: string;
+  note?: string;
   stale_reason?: string | null;
   display_scale?: number;
   provenance?: "user_provided" | "model_generated" | "illustrative";
@@ -1641,6 +1645,10 @@ export async function explainAnalysisResult(input: { analysis_id: string; analys
   return res.json();
 }
 
-export interface ResearchFinding { id:string; task_id:string; analysis_id:string; analysis_result_id:string; explanation_id:string; dataset_id:string; dataset_version_id:string; data_fingerprint:string; title:string; paragraphs:string[]; table_references:Array<{id:string;label:string;title:string}>; figure_references:Array<{id:string;label:string;title:string}>; style:Record<string,string>; status:string; created_at:string; }
+export interface ResearchFinding { id:string; task_id:string; analysis_id:string; analysis_result_id:string; explanation_id:string; dataset_id:string; dataset_version_id:string; data_fingerprint:string; title:string; paragraphs:string[]; table_references:Array<{id:string;label:string;title:string;number?:number|null;research_object_id?:string|null}>; figure_references:Array<{id:string;label:string;title:string;number?:number|null;research_object_id?:string|null}>; research_object_ids?:string[]; style:Record<string,string>; status:string; created_at:string; }
+export interface ResearchObject { id:string; type:"dataset"|"analysis"|"table"|"figure"|"finding"; task_id:string; title:string; source_id:string; number:number|null; number_label:string|null; status:string; created_at:string; updated_at:string; }
+export interface RenumberResponse { task_id:string; numbering_mode:"global"|"chapter"; numbering_config:{mode:"global"|"chapter"}; figures:Array<{id:string;figure_number:number;title:string}>; tables:Array<{id:string;table_number:number;title:string}>; objects:ResearchObject[]; }
 export async function createResearchFinding(input:{task_id:string;analysis_id:string;analysis_result_id:string;explanation_id:string;style:Record<string,string>}):Promise<ResearchFinding>{ const r=await apiFetch(`${API_BASE}/api/research-findings`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(input)}); if(!r.ok) throw await toError(r); return r.json(); }
 export async function insertResearchFinding(id:string,section_id:string):Promise<{block:unknown}>{const r=await apiFetch(`${API_BASE}/api/research-findings/${id}/insert`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({section_id})});if(!r.ok) throw await toError(r);return r.json();}
+export async function getTaskResearchObjects(taskId:string):Promise<{objects:ResearchObject[]}>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/research-objects`);if(!r.ok) throw await toError(r);return r.json();}
+export async function renumberTaskReferences(taskId:string):Promise<RenumberResponse>{const r=await apiFetch(`${API_BASE}/api/tasks/${taskId}/renumber`,{method:"POST"});if(!r.ok) throw await toError(r);return r.json();}

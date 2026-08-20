@@ -22,6 +22,7 @@ from app.api.analyses import router as analyses_router
 from app.api.research_assistant import router as research_assistant_router
 from app.api.research_explanations import router as research_explanations_router
 from app.api.research_findings import router as research_findings_router
+from app.api.research_objects import router as research_objects_router
 
 from app.config import settings
 from app.db import init_db
@@ -105,6 +106,7 @@ app.include_router(analyses_router)
 app.include_router(research_assistant_router)
 app.include_router(research_explanations_router)
 app.include_router(research_findings_router)
+app.include_router(research_objects_router)
 
 
 if __name__ == "__main__":

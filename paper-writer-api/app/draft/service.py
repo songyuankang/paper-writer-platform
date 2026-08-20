@@ -19,7 +19,9 @@ from pathlib import Path
 
 from app.config import settings
 from app.draft import outline as outline_mod
-from app.draft.chart_runtime import figure_sections_for_draft, recompute_chart_block, walk_sections
+from app.draft.chart_runtime import recompute_chart_block, walk_sections
+from app.services.research_object_service import renumber_document_references
+
 from app.formatter import service as formatter_service
 from app.models.task import TaskStatus
 from app.services import deepseek, deepseek_service, model_service
@@ -898,7 +900,10 @@ class DraftService:
                         or not (block.get("asset") or {}).get("png_path")
                     ):
                         recompute_chart_block(draft, self.task_dir, block)
-            figure_sections_for_draft(draft)
+            # ResearchObject is the sole numbering authority.  It persists global
+            # Figure/Table numbers before spec construction so editor and DOCX share
+            # exactly the same domain facts, including old drafts without numbers.
+            renumber_document_references(self.task_id, settings, draft)
             self.save(draft)
         paper = self._paper_info(draft)
 
@@ -951,7 +956,11 @@ class DraftService:
                     png_path = str(asset.get("png_path") or "")
                     chart = p.get("chart") or {}
                     chart_title = str(p.get("title") or chart.get("title") or "图表")
-                    figure_number = str(p.get("figure_number") or "图")
+                    raw_figure_number = p.get("figure_number")
+                    try:
+                        figure_number = f"图{int(raw_figure_number)}" if int(raw_figure_number) > 0 else "图"
+                    except (TypeError, ValueError):
+                        figure_number = "图"
                     caption = str(p.get("caption") or chart.get("caption") or "")
                     if png_path and (self.task_dir / png_path).is_file():
                         spec_sections.append({
@@ -979,13 +988,23 @@ class DraftService:
                         spec_sections.append({"type": "p", "text": f"{figure_number}：{chart_title}。{caption}"})
                 # chart-block export adapter
                 elif kind == "table":
+                    raw_table_number = p.get("table_number")
+                    try:
+                        table_label = f"表{int(raw_table_number)}" if int(raw_table_number) > 0 else "表"
+                    except (TypeError, ValueError):
+                        table_label = "表"
+                    table_title = str(p.get("title") or "数据表")
                     spec_sections.append({
                         "type": "table",
-                        "title": str(p.get("title") or "数据表"),
+                        "title": f"{table_label} {table_title}",
                         "headers": list(p.get("headers") or []),
                         "rows": list(p.get("rows") or []),
                     })
+                    source_note = "".join(str(value) for value in [p.get("source") or "", p.get("note") or ""])
+                    if source_note:
+                        spec_sections.append({"type": "p", "text": source_note})
                     continue
+
                 if kind == "chart":
                     continue
                 text = (p.get("text") or "").strip()

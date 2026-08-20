@@ -6,7 +6,6 @@ type ChartPatch = { title?: string; caption?: string; display_scale?: number };
 type Props = {
   taskId: string;
   block: DraftParagraph;
-  index: number;
   onUpdate?: (patch: ChartPatch) => Promise<void> | void;
   onRegenerate?: () => Promise<void> | void;
   onDelete: () => void;
@@ -99,7 +98,7 @@ function ChartAsset({ taskId, block }: { taskId: string; block: DraftParagraph }
   return <FallbackCanvas block={block} />;
 }
 
-export default function EditableDraftChartBlock({ taskId, block, index, onUpdate, onRegenerate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
+export default function EditableDraftChartBlock({ taskId, block, onUpdate, onRegenerate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(text(block.title, "图表"));
@@ -108,7 +107,7 @@ export default function EditableDraftChartBlock({ taskId, block, index, onUpdate
   const chart = chartData(block);
   const provenance = block.provenance === "user_provided" ? "来源：论文数据表" : block.provenance === "model_generated" ? "来源：模型生成" : "数据示意";
   const label = useMemo(() => ({ bar: "柱状图", line: "折线图", mixed: "柱线混合图", pie: "饼图" }[chart.kind] || "图表"), [chart.kind]);
-  const figureNumber = block.figure_number || `图${index + 1}`;
+  const figureNumber = typeof block.figure_number === "number" && block.figure_number > 0 ? `图${block.figure_number}` : "图（待编号）";
   const stale = block.status === "stale";
 
   async function savePatch(patch: ChartPatch) { if (!onUpdate) return; setBusy(true); try { await onUpdate(patch); } finally { setBusy(false); } }

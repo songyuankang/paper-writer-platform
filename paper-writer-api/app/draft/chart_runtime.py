@@ -724,16 +724,21 @@ def adapt_insight_chart(draft: dict[str, Any], task_dir: Path, insight_id: str) 
 
 
 def figure_sections_for_draft(draft: dict[str, Any]) -> dict[str, str]:
+    """Return persisted FigureBlock labels for legacy callers.
+
+    Document numbering is owned by ``ResearchObjectService``.  This compatibility
+    helper deliberately does not infer a fresh index so DOCX export cannot diverge
+    from the number stored in draft.json and shown in the editor.
+    """
     numbers: dict[str, str] = {}
-    index = 0
     for section in walk_sections(draft.get("sections") or []):
         for block in section.get("paragraphs") or []:
-            if block.get("type") != "chart" or block.get("status") != "ready":
+            if block.get("type") not in {"chart", "figure"}:
                 continue
-            if not (block.get("asset") or {}).get("png_path"):
+            try:
+                value = int(block.get("figure_number"))
+            except (TypeError, ValueError):
                 continue
-            index += 1
-            number_label = f"图{index}"
-            block["figure_number"] = number_label
-            numbers[str(block.get("id"))] = number_label
+            if value > 0:
+                numbers[str(block.get("id"))] = f"图{value}"
     return numbers

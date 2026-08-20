@@ -21,6 +21,7 @@ import {
   generateDraftEnAbstract,
   generateDraftSection,
   moveDraftParagraph,
+  renumberTaskReferences,
   updateDraftParagraph,
   updateDraftSection,
   type PaperDraft,
@@ -324,21 +325,31 @@ export default function BodyEditorUniPaper({
     }
   }
 
+  async function renumberReferences() {
+    setError(null);
+    try {
+      await renumberTaskReferences(taskId);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重新编号失败");
+    }
+  }
+
   async function delPara(pid: string) {
     try {
       await deleteDraftParagraph(taskId, pid);
-      await refresh();
-    } catch {
-      /* 忽略 */
+      await renumberReferences();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "删除内容块失败");
     }
   }
 
   async function movePara(pid: string, direction: "up" | "down") {
     try {
       await moveDraftParagraph(taskId, pid, direction);
-      await refresh();
-    } catch {
-      /* 忽略 */
+      await renumberReferences();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "移动内容块失败");
     }
   }
 
@@ -437,6 +448,14 @@ export default function BodyEditorUniPaper({
           <button type="button" onClick={() => setHistoryOpen(true)} className="hover:text-black">历史记录</button>
           <button type="button" onClick={() => setModelSettingsOpen(true)} className="hover:text-black">模型设置</button>
         </nav>
+        <button
+          type="button"
+          onClick={() => void renumberReferences()}
+          disabled={draft.generating}
+          className={BTN_GHOST}
+        >
+          重新编号
+        </button>
         <button
           type="button"
           onClick={() => setOneclickConfirmOpen(true)}

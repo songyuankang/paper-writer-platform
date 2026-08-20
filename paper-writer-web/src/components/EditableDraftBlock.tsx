@@ -112,14 +112,14 @@ export default function EditableDraftBlock({
     return <EditableInsightBlock block={block} index={index} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "chart") {
-    return <EditableDraftChartBlock taskId={taskId} block={block} index={index} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
+    return <EditableDraftChartBlock taskId={taskId} block={block} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "table") {
     return (
       <>
         <div className="rounded-lg border border-neutral-200 bg-white p-3 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-semibold text-neutral-700">{block.title || `表格 ${index + 1}`}</span>
+            <span className="text-xs font-semibold text-neutral-700">{typeof block.table_number === "number" && block.table_number > 0 ? `表${block.table_number} ${block.title || "数据表"}` : (block.title || "数据表（待编号）")}</span>
             <div className="flex gap-1">
               <button className={BTN} onClick={() => setEditing(true)}>修改表格</button>
               <button className={BTN} disabled={!canMoveUp} onClick={() => onMove("up")}>↑</button>
