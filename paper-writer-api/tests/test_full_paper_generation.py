@@ -279,3 +279,24 @@ def test_dataset_version_materializes_ready_candidate_then_inserts_figureblock(t
     assert inserted_summary["inserted_count"] == 1
     blocks = next(section for section in draft.load()["sections"] if section["id"] == "4-2-1")["paragraphs"]
     assert any(block.get("id") == block_id and block.get("type") == "chart" for block in blocks)
+
+
+def test_resume_rebuilds_legacy_provisional_plan_after_research_is_ready(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    draft = semantic_plan_paper(settings)
+    literature = seed_verified_literature(settings)
+    pipeline = FullPaperGenerationService(draft)
+    configure_pipeline_for_local_sources(pipeline, draft, literature, monkeypatch)
+
+    pipeline.start()
+    pipeline._prepare_global_research(None)
+    legacy = pipeline.visualization_plan.get(TASK)
+    assert legacy is not None and legacy["finalized"] is True
+    legacy.update({"finalized": False, "status": "planned", "items": []})
+    pipeline.visualization_plan._write(TASK, legacy)
+
+    completed = pipeline.run()
+    rebuilt = pipeline.visualization_plan.get(TASK)
+    assert rebuilt is not None and rebuilt["finalized"] is True
+    assert len(rebuilt["items"]) == 3
+    assert completed["full_paper_pipeline"]["visualization_plan"]["total_items"] == 3

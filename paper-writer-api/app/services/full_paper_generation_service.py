@@ -438,6 +438,18 @@ class FullPaperGenerationService:
         self._prepare_global_research(selected_model)
         if self._pause_requested():
             return self.draft_service.load()
+        # 兼容旧任务或在全局资料准备后暂停的任务：若保留的是旧版预判/空计划，
+        # 在真正生成章节前按已准备的资料补建一次最终计划。
+        plan = self.visualization_plan.get(self.task_id)
+        if not plan or not plan.get("finalized"):
+            finalized_plan = self.visualization_plan.build(self.task_id, self.draft_service.load(), replace=True)
+            self._save_state(
+                status="running",
+                stage="visualization_planning",
+                message="正在按最终研究图表计划生成正文",
+                visualization_plan=self.visualization_plan.summary(self.task_id),
+                visualization_plan_id=finalized_plan.get("id"),
+            )
         for index, section in enumerate(leaves, start=1):
             if str(section.get("id")) in completed:
                 continue
