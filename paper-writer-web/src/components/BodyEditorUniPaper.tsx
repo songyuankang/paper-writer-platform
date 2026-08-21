@@ -11,6 +11,8 @@ import {
   addDraftChart,
   createDraftInsight,
   regenerateDraftChart,
+  previewAiDraftChartRegenerate,
+  confirmAiDraftChartRegenerate,
   updateDraftChart,
   updateDraftChartSpec,
   deleteDraftParagraph,
@@ -360,6 +362,19 @@ export default function BodyEditorUniPaper({
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "重新生成图表失败");
+    }
+  }
+
+  async function aiRegenerateChart(blockId: string) {
+    setError(null);
+    try {
+      const preview = await previewAiDraftChartRegenerate(taskId, blockId);
+      if (!preview.requires_confirmation || !preview.candidate_chart_spec) return;
+      if (!window.confirm(`${preview.message}\n\n确认后将创建新的 AI 图表版本，现有用户版本不会被覆盖。`)) return;
+      await confirmAiDraftChartRegenerate(taskId, blockId, preview.candidate_chart_spec);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "AI 图表候选生成失败");
     }
   }
 
@@ -992,6 +1007,7 @@ export default function BodyEditorUniPaper({
 
           onChartUpdate={(id, patch) => void patchChart(id, patch)}
           onRegenerateChart={(id) => void regenerateChart(id)}
+                          onAiRegenerateChart={(id) => aiRegenerateChart(id)}
                           onChartSpecUpdate={(id, chartSpec) => patchChartSpec(id, chartSpec)}
                           onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
                           onPatchPara={patchParagraph}
@@ -1022,6 +1038,7 @@ export default function BodyEditorUniPaper({
                             onRefresh={async () => { await refresh(); }}
                             onChartUpdate={(id, patch) => void patchChart(id, patch)}
                             onRegenerateChart={(id) => void regenerateChart(id)}
+                          onAiRegenerateChart={(id) => aiRegenerateChart(id)}
                           onChartSpecUpdate={(id, chartSpec) => patchChartSpec(id, chartSpec)}
                           onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
                             onPatchPara={patchParagraph}
@@ -1260,6 +1277,7 @@ function LeafSection({
   onRefresh,
   onChartUpdate,
   onRegenerateChart,
+  onAiRegenerateChart,
   onChartSpecUpdate,
   onPatchPara,
   onPatchBlock,
@@ -1280,6 +1298,7 @@ function LeafSection({
   onRefresh: () => Promise<void> | void;
   onChartUpdate: (id: string, patch: { title?: string; caption?: string; display_scale?: number }) => void;
   onRegenerateChart: (id: string) => void;
+  onAiRegenerateChart: (id: string) => Promise<void>;
   onChartSpecUpdate: (id: string, chartSpec: DraftChartSpec) => Promise<void>;
   onPatchPara: (pid: string, text: string) => void;
   onPatchBlock: (id: string, patch: { text?: string; title?: string; headers?: string[]; rows?: string[][] }) => void;
@@ -1316,6 +1335,7 @@ function LeafSection({
             onRefresh={onRefresh}
             onChartUpdate={(patch) => onChartUpdate(p.id, patch)}
             onRegenerateChart={() => onRegenerateChart(p.id)}
+            onAiRegenerateChart={() => onAiRegenerateChart(p.id)}
             onChartSpecUpdate={(chartSpec) => onChartSpecUpdate(p.id, chartSpec)}
             onDelete={() => onDel(p.id)}
             onMove={(direction) => onMove(p.id, direction)}

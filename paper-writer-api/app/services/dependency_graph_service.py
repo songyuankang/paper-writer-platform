@@ -220,6 +220,21 @@ class DependencyGraphService:
                 continue
         return records
 
+    def _read_chart_versions(self, task_id: str) -> list[dict[str, Any]]:
+        directory = self.settings.output_dir / task_id / "chart_versions"
+        records: list[dict[str, Any]] = []
+        for path in directory.glob("*.json") if directory.exists() else []:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                for item in payload.get("versions") or []:
+                    if isinstance(item, dict) and item.get("task_id") == task_id and item.get("id"):
+                        record = dict(item)
+                        record["title"] = f"图表版本 {str(item.get('id'))[-6:]}"
+                        records.append(record)
+            except json.JSONDecodeError:
+                continue
+        return records
+
     @staticmethod
     def _block_type(block: dict[str, Any]) -> str | None:
         if block.get("type") == "table":
@@ -375,6 +390,32 @@ class DependencyGraphService:
                         if artifact and block.get("id"):
                             links.append(self._link(task_id, "visualization_candidate", candidate["id"], artifact, str(block["id"]), "inserts"))
 
+        # ChartVersion is a first-class provenance node. Dataset/Evidence edges
+        # stay upstream so existing impact traversal can surface the current
+        # FigureBlock when a source version becomes stale.
+        for chart_version in self._read_chart_versions(task_id):
+            version_id = str(chart_version.get("id") or "")
+            figure_id = str(chart_version.get("figure_id") or "")
+            if not version_id or not figure_id:
+                continue
+            links.append(self._link(task_id, "chart_version", version_id, "figure", figure_id, "versions"))
+            binding = (chart_version.get("chart_spec") or {}).get("binding") or {}
+            dataset_id, dataset_version = str(binding.get("dataset_id") or ""), binding.get("dataset_version")
+            if dataset_id and dataset_version:
+                links.append(self._link(task_id, "dataset_version", _version_node(dataset_id, dataset_version), "chart_version", version_id, "derived_from", int(dataset_version)))
+            for source in chart_version.get("source_snapshot") or []:
+                source_type, source_id = str(source.get("source_type") or ""), str(source.get("source_id") or "")
+                if source_type == "dataset" and source_id:
+                    version = source.get("dataset_version")
+                    if version:
+                        links.append(self._link(task_id, "dataset_version", _version_node(source_id, version), "chart_version", version_id, "derived_from", int(version)))
+                    else:
+                        links.append(self._link(task_id, "dataset", source_id, "chart_version", version_id, "derived_from"))
+                elif source_type == "table_block" and source_id:
+                    links.append(self._link(task_id, "table", source_id, "chart_version", version_id, "derived_from"))
+                elif source_type in {"literature", "literature_evidence", "research_evidence"} and source_id:
+                    links.append(self._link(task_id, source_type, source_id, "chart_version", version_id, "references"))
+
         # Deterministic de-duplication makes repeated lazy rebuilds idempotent.
         unique = {item["id"]: item for item in links}
         ordered = sorted(unique.values(), key=lambda item: (item["source_type"], item["source_id"], item["target_type"], item["target_id"], item["relation"]))
@@ -416,6 +457,7 @@ class DependencyGraphService:
         discussion_drafts = {item["id"]: item for item in self._read_discussion_drafts(task_id)}
         research_evidence = {item["id"]: item for item in self._read_research_evidence(task_id)}
         visualization_candidates = {item["id"]: item for item in self._read_visualization_candidates(task_id)}
+        chart_versions = {item["id"]: item for item in self._read_chart_versions(task_id)}
         records: dict[tuple[str, str], dict[str, Any]] = {}
         for dataset in self.datasets.list_datasets(task_id):
             try:
@@ -471,6 +513,8 @@ class DependencyGraphService:
                     candidate_status = "stale"
             record["status"] = candidate_status
             records[("visualization_candidate", item["id"])] = record
+        for item in chart_versions.values():
+            records[("chart_version", item["id"])] = item
         for item in discussion_drafts.values():
             record = dict(item); snapshot = item.get("source_snapshot") or {}
             stale = False

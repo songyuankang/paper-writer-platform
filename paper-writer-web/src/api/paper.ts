@@ -601,6 +601,28 @@ export interface DraftChartSpec {
   binding?: { dataset_id?: string; dataset_version?: number; source_table_id?: string; data_fingerprint?: string };
   appearance?: { template?: string; theme?: string; legend?: boolean; value_labels?: boolean; grid?: boolean; palette?: string[]; font_size?: number; x_label?: string; y_label?: string };
 }
+export interface ChartVersionSummary {
+  id: string;
+  figure_id: string;
+  editor: { type: "user" | "ai" | "system"; name: string };
+  reason: "initial" | "user_edit" | "ai_regenerate" | "recompute" | "restore";
+  parent_version_id?: string | null;
+  created_at: string;
+  preview_asset: string;
+  source_count: number;
+  is_current?: boolean;
+}
+export interface ChartVersionHistory {
+  figure_id: string;
+  current_chart_version_id: string;
+  versions: ChartVersionSummary[];
+}
+export interface AiChartCandidateResponse {
+  requires_confirmation: boolean;
+  candidate_chart_spec?: DraftChartSpec;
+  block?: DraftParagraph;
+  message: string;
+}
 export interface DraftChartAsset {
   id: string;
   png_path: string;
@@ -1311,6 +1333,30 @@ export async function updateDraftChartSpec(taskId: string, blockId: string, char
   if (!res.ok) throw await toError(res);
   return res.json();
 }
+export async function previewAiDraftChartRegenerate(taskId: string, blockId: string, chartKind?: DraftChartSpec["kind"]): Promise<AiChartCandidateResponse> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/ai-regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: false, chart_kind: chartKind }) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function confirmAiDraftChartRegenerate(taskId: string, blockId: string, candidateChartSpec: DraftChartSpec): Promise<AiChartCandidateResponse> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/ai-regenerate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmed: true, candidate_chart_spec: candidateChartSpec }) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function fetchDraftChartVersions(taskId: string, blockId: string): Promise<ChartVersionHistory> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/versions");
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+export async function restoreDraftChartVersion(taskId: string, blockId: string, versionId: string): Promise<DraftParagraph> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/restore/" + versionId, { method: "POST" });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
 export async function fetchDraftChartAsset(taskId: string, blockId: string, format: "svg" | "png" = "svg"): Promise<Blob> {
   const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/asset?format=" + format);
   if (!res.ok) throw await toError(res);

@@ -27,6 +27,7 @@ type Props = {
   canMoveDown: boolean;
   onChartUpdate?: (patch: { title?: string; caption?: string; display_scale?: number }) => Promise<void> | void;
   onRegenerateChart?: () => Promise<void> | void;
+  onAiRegenerateChart?: () => Promise<void> | void;
   onChartSpecUpdate?: (chartSpec: EditableChartSpec) => Promise<void> | void;
 };
 
@@ -111,6 +112,7 @@ export default function EditableDraftBlock({
   canMoveDown,
   onChartUpdate,
   onRegenerateChart,
+  onAiRegenerateChart,
   onChartSpecUpdate,
 }: Props) {
   const [editing, setEditing] = useState(false);
@@ -118,7 +120,7 @@ export default function EditableDraftBlock({
     return <EditableInsightBlock block={block} index={index} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "chart") {
-    return <EditableDraftChartBlock taskId={taskId} block={block} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onChartSpecUpdate={onChartSpecUpdate} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
+    return <EditableDraftChartBlock taskId={taskId} block={block} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onAiRegenerate={onAiRegenerateChart} onRefresh={onRefresh} onChartSpecUpdate={onChartSpecUpdate} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "cross_reference") {
     return <EditableCrossReferenceBlock taskId={taskId} block={block} onRefresh={onRefresh || (async () => undefined)} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;

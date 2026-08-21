@@ -8,14 +8,18 @@ import pytest
 
 from app.config import Settings
 from app.draft.chart_blocks import (
+    AIChartRegenerateRequest,
     ChartCreateRequest,
     ChartSpecUpdateRequest,
+    ai_chart_candidate,
     create_chart_block,
     update_chart_spec_block,
 )
 from app.draft.service import DraftService
 from app.services.cross_reference_service import CrossReferenceService
 from app.services.research_object_service import ResearchObjectService
+from app.services.chart_version_service import ChartVersionService
+from app.draft.chart_versions import restore_chart_version
 
 
 TASK = "b" * 32
@@ -86,6 +90,56 @@ def test_body_chart_spec_edit_persists_asset_cross_reference_and_docx(tmp_path: 
     stored_reference = next(item for item in CrossReferenceService(settings).list(TASK) if item["id"] == reference["reference"]["id"])
     assert stored_reference["target_object_id"] == figure_object["id"]
 
+    files = service.export()
+    docx = next(Path(path) for path in files if str(path).endswith(".docx"))
+    if not docx.is_absolute():
+        docx = task_dir / docx
+    with zipfile.ZipFile(docx) as document:
+        assert any(name.startswith("word/media/") for name in document.namelist())
+
+
+def test_chart_version_audit_chain_ai_confirmation_restore_and_docx(tmp_path: Path):
+    settings = _settings(tmp_path)
+    task_dir = settings.output_dir / TASK
+    service = DraftService(TASK, task_dir)
+    service.save(_draft())
+    chart = create_chart_block(service, "1-1", ChartCreateRequest(title_hint="模型准确率比较"))
+    versions = ChartVersionService(settings)
+    initial = versions.list(TASK, chart["id"])
+    assert len(initial) == 1
+    assert initial[0]["reason"] == "initial"
+    assert initial[0]["source_snapshot"][0]["source_type"] in {"dataset", "table_block"}
+
+    edited = json.loads(json.dumps(chart["chart_spec"]))
+    edited["data"]["series"][0]["values"][1] = 96.0
+    update_chart_spec_block(service, chart["id"], ChartSpecUpdateRequest(chart_spec=edited))
+    after_user = versions.list(TASK, chart["id"])
+    assert len(after_user) == 2
+    assert after_user[-1]["editor"]["type"] == "user"
+    assert after_user[-1]["reason"] == "user_edit"
+
+    preview = ai_chart_candidate(service, chart["id"], AIChartRegenerateRequest())
+    assert preview["requires_confirmation"] is True
+    assert len(versions.list(TASK, chart["id"])) == 2
+    confirmed = ai_chart_candidate(service, chart["id"], AIChartRegenerateRequest(confirmed=True, candidate_chart_spec=preview["candidate_chart_spec"]))
+    assert confirmed["requires_confirmation"] is False
+    after_ai = versions.list(TASK, chart["id"])
+    assert len(after_ai) == 3
+    assert after_ai[-1]["editor"]["type"] == "ai"
+    assert after_ai[-1]["reason"] == "ai_regenerate"
+
+    restored = restore_chart_version(service, chart["id"], initial[0]["id"])
+    after_restore = versions.list(TASK, chart["id"])
+    assert len(after_restore) == 4
+    assert after_restore[-1]["reason"] == "restore"
+    assert after_restore[-1]["parent_version_id"] == initial[0]["id"]
+    assert restored["current_chart_version_id"] == after_restore[-1]["id"]
+    assert restored["chart_spec"]["data"]["series"][0]["values"][1] == 95.3
+
+    objects = ResearchObjectService(settings)
+    objects.renumber_document_references(TASK)
+    latest = next(item for item in service.load()["sections"][0]["paragraphs"] if item.get("id") == chart["id"])
+    assert latest["figure_number"] == 1
     files = service.export()
     docx = next(Path(path) for path in files if str(path).endswith(".docx"))
     if not docx.is_absolute():

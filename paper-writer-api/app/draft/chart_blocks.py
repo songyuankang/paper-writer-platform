@@ -6,6 +6,7 @@ persisted before the block is returned to the UI.
 """
 from __future__ import annotations
 
+import copy
 import math
 import uuid
 from typing import Any, Literal
@@ -21,7 +22,7 @@ from app.draft.chart_runtime import (
     recompute_chart_block,
     render_chart_assets,
 )
-from app.services.dependency_graph_service import DependencyGraphService
+from app.draft.chart_versions import bootstrap_chart_version, commit_chart_version
 
 # ``mixed`` remains a legacy alias; all current kinds are rendered by the
 # single ChartRenderer in chart_runtime.
@@ -44,6 +45,12 @@ class ChartPatchRequest(BaseModel):
 class ChartRegenerateRequest(BaseModel):
     chart_kind: ChartKind | None = None
     illustrative: bool = False
+
+
+class AIChartRegenerateRequest(BaseModel):
+    confirmed: bool = False
+    chart_kind: ChartKind | None = None
+    candidate_chart_spec: dict[str, Any] | None = None
 
 
 class ChartSpecUpdateRequest(BaseModel):
@@ -220,9 +227,11 @@ def update_chart_spec_block(service, block_id: str, request: ChartSpecUpdateRequ
     """
     with service.lock:
         draft = service.load()
+        before_draft = copy.deepcopy(draft)
         _, block = locate_block(draft, block_id)
         if block.get("type") != "chart":
             raise ValueError("目标内容块不是图表")
+        previous_block = copy.deepcopy(block)
         spec = _manual_chart_spec(block, request.chart_spec)
         version = int(block.get("version") or 0) + 1
         block.update({
@@ -237,16 +246,59 @@ def update_chart_spec_block(service, block_id: str, request: ChartSpecUpdateRequ
             "stale_reason": None,
             "updated_at": now(),
         })
-        service.save(draft)
-        # DependencyGraph is derived from authoritative draft records. Rebuild it
-        # after persistence so its existing FigureBlock node continues to point at
-        # the current Dataset/Evidence linkage without changing ResearchObject IDs.
-        try:
-            DependencyGraphService(service._storage_settings()).rebuild_task(service.task_id)
-        except (OSError, ValueError):
-            # Graph rebuilding is recoverable and must not discard a valid chart edit.
-            pass
+        commit_chart_version(
+            service, draft, before_draft, block, previous_block,
+            editor={"type": "user", "name": "用户"}, reason="user_edit",
+        )
         return block
+
+
+def ai_chart_candidate(service, block_id: str, request: AIChartRegenerateRequest) -> dict[str, Any]:
+    """Return or explicitly confirm an AI-proposed ChartSpec without source mutation.
+
+    The current task has no authority to let an AI alter provenance. The candidate
+    is therefore a structured proposal based only on the FigureBlock's existing
+    ChartSpec, binding and Evidence snapshot; it is persisted only after the
+    caller sends ``confirmed=True``.
+    """
+    with service.lock:
+        draft = service.load()
+        _, block = locate_block(draft, block_id)
+        if block.get("type") != "chart":
+            raise ValueError("目标内容块不是图表")
+        current = copy.deepcopy(block.get("chart_spec") or {})
+        if not current:
+            raise ValueError("图表缺少可供 AI 生成的 ChartSpec")
+        if request.candidate_chart_spec is not None:
+            candidate = request.candidate_chart_spec
+        else:
+            candidate = current
+            if request.chart_kind:
+                candidate["kind"] = _kind(request.chart_kind)
+        # Enforce the same protected binding/provenance checks at preview time.
+        candidate = _manual_chart_spec(block, candidate)
+        if not request.confirmed:
+            return {"requires_confirmation": True, "candidate_chart_spec": candidate, "message": "AI 候选仅使用当前已绑定的数据和来源；确认后才创建新版本。"}
+
+        before_draft = copy.deepcopy(draft)
+        previous_block = copy.deepcopy(block)
+        render_version = int(block.get("version") or 0) + 1
+        block.update({
+            "status": "ready",
+            "version": render_version,
+            "title": candidate["title"],
+            "caption": candidate["caption"],
+            "chart_spec": candidate,
+            "chart": {"schema_version": 2, "kind": candidate["kind"], "title": candidate["title"], "caption": candidate["caption"], **candidate["data"]},
+            "asset": _asset_from_spec(service, str(block["id"]), render_version, candidate),
+            "stale_reason": None,
+            "updated_at": now(),
+        })
+        commit_chart_version(
+            service, draft, before_draft, block, previous_block,
+            editor={"type": "ai", "name": "AI（已确认候选）"}, reason="ai_regenerate",
+        )
+        return {"requires_confirmation": False, "block": block, "message": "已根据确认的 AI 候选创建新图表版本。"}
 
 
 def create_chart_block(service, section_id: str, request: ChartCreateRequest) -> dict:
@@ -285,15 +337,18 @@ def create_chart_block(service, section_id: str, request: ChartCreateRequest) ->
                 "source_ids": ["illustrative:" + chart_id],
                 "generated_at": now(),
             }
+        before_draft = copy.deepcopy(draft)
         section.setdefault("paragraphs", []).append(block)
-        service.save(draft)
+        bootstrap_chart_version(service, draft, block, before_draft)
         return block
 
 
 def regenerate_chart_block(service, block_id: str, request: ChartRegenerateRequest) -> dict:
     with service.lock:
         draft = service.load()
+        before_draft = copy.deepcopy(draft)
         _, block = locate_block(draft, block_id)
+        previous_block = copy.deepcopy(block)
         if block.get("type") != "chart":
             raise ValueError("目标内容块不是图表")
         binding = (block.get("chart_spec") or {}).get("binding") or {}
@@ -321,14 +376,19 @@ def regenerate_chart_block(service, block_id: str, request: ChartRegenerateReque
             })
         else:
             raise ValueError("图表没有可重新计算的数据表绑定")
-        service.save(draft)
+        commit_chart_version(
+            service, draft, before_draft, block, previous_block,
+            editor={"type": "system", "name": "系统重新计算"}, reason="recompute",
+        )
         return block
 
 
 def patch_chart_block(service, block_id: str, request: ChartPatchRequest) -> dict:
     with service.lock:
         draft = service.load()
+        before_draft = copy.deepcopy(draft)
         _, block = locate_block(draft, block_id)
+        previous_block = copy.deepcopy(block)
         if block.get("type") != "chart":
             raise ValueError("目标内容块不是图表")
         spec = block.setdefault("chart_spec", {})
@@ -350,5 +410,11 @@ def patch_chart_block(service, block_id: str, request: ChartPatchRequest) -> dic
         compatibility["title"] = block.get("title", "")
         compatibility["caption"] = block.get("caption", "")
         block["updated_at"] = now()
-        service.save(draft)
+        if request.title is not None or request.caption is not None:
+            commit_chart_version(
+                service, draft, before_draft, block, previous_block,
+                editor={"type": "user", "name": "用户"}, reason="user_edit",
+            )
+        else:
+            service.save(draft)
         return block

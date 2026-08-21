@@ -37,6 +37,7 @@ from app.draft.insight_blocks import (
     regenerate_insight_block,
 )
 from app.draft.chart_blocks import (
+    AIChartRegenerateRequest,
     ChartCreateRequest,
     ChartPatchRequest,
     ChartRegenerateRequest,
@@ -44,8 +45,12 @@ from app.draft.chart_blocks import (
     create_chart_block,
     patch_chart_block,
     regenerate_chart_block,
-    update_chart_spec_block,
+        update_chart_spec_block,
+    ai_chart_candidate,
 )
+from app.draft.chart_versions import bootstrap_chart_version, export_version_summary, restore_chart_version
+from app.services.chart_version_service import ChartVersionService
+
 from app.services import history_service
 from app.services.dataset_service import DatasetService
 from app.services.full_paper_generation_service import FullPaperGenerationService
@@ -511,6 +516,39 @@ def regenerate_chart(task_id: str, block_id: str, body: ChartRegenerateRequest, 
         return regenerate_chart_block(_service(task_id, request), block_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/{task_id}/chart/{block_id}/ai-regenerate")
+def ai_regenerate_chart(task_id: str, block_id: str, body: AIChartRegenerateRequest, request: Request):
+    try:
+        return ai_chart_candidate(_service(task_id, request), block_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/{task_id}/chart/{block_id}/versions")
+def list_chart_versions(task_id: str, block_id: str, request: Request) -> dict:
+    service = _service(task_id, request)
+    try:
+        with service.lock:
+            draft = service.load()
+            before = __import__("copy").deepcopy(draft)
+            _, block = locate_chart(draft, block_id)
+            bootstrap_chart_version(service, draft, block, before)
+            versions = ChartVersionService(service._storage_settings()).list(task_id, block_id)
+            current = str(block.get("current_chart_version_id") or "")
+            items = [dict(export_version_summary(item), is_current=item.get("id") == current) for item in reversed(versions)]
+            return {"figure_id": block_id, "current_chart_version_id": current, "versions": items}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/chart/{block_id}/restore/{version_id}")
+def restore_chart_version_endpoint(task_id: str, block_id: str, version_id: str, request: Request) -> dict:
+    try:
+        return restore_chart_version(_service(task_id, request), block_id, version_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.patch("/{task_id}/chart/{block_id}")
