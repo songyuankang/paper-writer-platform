@@ -321,7 +321,9 @@ class ResearchVisualizationService:
             if not quote or quote.lower() not in text.lower():
                 item["verification_issues"].append("原文摘录无法在声明的文献位置中核验。")
             needle = _clean(f"{item.get('value')} {unit}").replace(".0 ", " ").lower()
-            if needle and needle not in quote.lower().replace(",", ""):
+            compact_needle = re.sub(r"\s+", "", needle)
+            compact_quote = re.sub(r"\s+", "", quote.lower().replace(",", ""))
+            if needle and compact_needle not in compact_quote:
                 item["verification_issues"].append("数值与单位未同时出现在保存的原文摘录中。")
             item["source_updated_at"] = literature.get("updated_at")
         elif source_type == "user_provided":
@@ -331,7 +333,9 @@ class ResearchVisualizationService:
             if not _clean(item.get("source_title")) or not quote:
                 item["verification_issues"].append("用户提供数据缺少可追溯来源标题或原文摘录。")
             needle = _clean(f"{item.get('value')} {unit}").replace(".0 ", " ").lower()
-            if needle and needle not in quote.lower().replace(",", ""):
+            compact_needle = re.sub(r"\s+", "", needle)
+            compact_quote = re.sub(r"\s+", "", quote.lower().replace(",", ""))
+            if needle and compact_needle not in compact_quote:
                 item["verification_issues"].append("用户提供来源摘录未包含对应数值与单位。")
         else:
             item["verification_issues"].append("未知来源类型，不能自动用于论文。")
@@ -418,10 +422,10 @@ class ResearchVisualizationService:
         service.save(draft)
         return {"chart_id": chart_id, "dataset_id": dataset["dataset_id"], "dataset_version": dataset["version"], "asset": block.get("asset"), "block_snapshot": copy.deepcopy(block)}
 
-    def recommend(self, *, task_id: str, section: str = "", evidence_ids: list[str] | None = None, dataset_id: str = "", dataset_version: int | None = None) -> list[dict[str, Any]]:
+    def recommend(self, *, task_id: str, section: str = "", evidence_ids: list[str] | None = None, dataset_id: str = "", dataset_version: int | None = None, include_evidence_recommendations: bool = True, include_literature_fallback: bool = True) -> list[dict[str, Any]]:
         task_id = _task_id(task_id)
         selected = {str(item) for item in evidence_ids or []}
-        evidence = [item for item in self.evidence(task_id) if item.get("verification_status") == VERIFIED and (not selected or item.get("id") in selected)]
+        evidence = [item for item in self.evidence(task_id) if item.get("verification_status") == VERIFIED and (not selected or item.get("id") in selected)] if include_evidence_recommendations else []
         candidates: list[dict[str, Any]] = []
         by_metric: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for item in evidence:
@@ -456,7 +460,7 @@ class ResearchVisualizationService:
             candidate = {"id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240), "kind": "table", "table_type": "technology_comparison", "title": table["title"], "reason": "不同技术具有已核验但量纲不同的参数，适合用保留单位与来源的技术对比表呈现，不能合并为数值图表。", "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [item["id"] for item in evidence], "source_snapshot": self._source_snapshot(evidence), "created_at": _now(), "updated_at": _now()}
             self._write(self._candidate_path(candidate["id"]), candidate)
             candidates.append(candidate)
-        if not candidates and len(evidence) < 2:
+        if not candidates and include_literature_fallback and len(evidence) < 2:
             literature = self.literature.list(task_id)
             if len(literature) >= 2:
                 records = literature[:10]
@@ -483,6 +487,28 @@ class ResearchVisualizationService:
             return [{"status": "pending", "reason": "尚无至少两项可比较的已核验证据。请保存来源、补充原文位置，或选择已有 Dataset 后再生成候选。"}]
         self.graph.rebuild_task(task_id)
         return candidates
+
+    def recommend_literature_review(self, *, task_id: str, section: str = "") -> list[dict[str, Any]]:
+        """Create only the source-backed literature review table candidate."""
+        task_id = _task_id(task_id)
+        records = self.literature.list(task_id)[:10]
+        if len(records) < 2:
+            return []
+        table = {
+            "type": "table", "title": "文献综述表", "headers": ["文献", "年份", "来源", "摘要信息"],
+            "rows": [[item.get("title"), item.get("year") or "", item.get("journal") or item.get("source"), _clean(item.get("abstract"), 220)] for item in records],
+        }
+        candidate = {
+            "id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240),
+            "kind": "table", "table_type": "literature_review", "title": "文献综述表",
+            "reason": "已保存文献仅在文献综述/研究现状章节中汇总为可追溯表格。",
+            "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [],
+            "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item in records],
+            "created_at": _now(), "updated_at": _now(),
+        }
+        self._write(self._candidate_path(candidate["id"]), candidate)
+        self.graph.rebuild_task(task_id)
+        return [candidate]
 
     def recommend_literature_trend(self, *, task_id: str, section: str = "") -> list[dict[str, Any]]:
         """Build a source-backed literature-year chart candidate.

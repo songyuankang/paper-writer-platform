@@ -15,6 +15,7 @@ from app.draft.service import DraftService, _leaf_ids
 from app.services.cross_reference_service import CrossReferenceService
 from app.services.research_object_service import ResearchObjectService
 from app.services.research_visualization_service import ResearchVisualizationService
+from app.services.visualization_plan_service import VisualizationPlanService
 
 
 PIPELINE_KEY = "full_paper_pipeline"
@@ -39,6 +40,7 @@ class FullPaperGenerationService:
         self.research = ResearchVisualizationService(self.settings)
         self.objects = ResearchObjectService(self.settings)
         self.references = CrossReferenceService(self.settings)
+        self.visualization_plan = VisualizationPlanService(self.settings)
 
     def _state(self, draft: dict) -> dict[str, Any]:
         state = draft.get(PIPELINE_KEY)
@@ -87,6 +89,7 @@ class FullPaperGenerationService:
                 old.update(status="running", stage="resuming", message="正在恢复全文生成", model_id=model_id or old.get("model_id"), resumed_at=_now(), updated_at=_now())
             else:
                 leaves = sorted(_leaf_ids(draft.get("sections") or []))
+                visualization_plan = self.visualization_plan.build(self.task_id, draft, replace=True)
                 old = {
                     "version": 1,
                     "status": "running",
@@ -100,6 +103,8 @@ class FullPaperGenerationService:
                     "inserted_block_ids": [],
                     "errors": [],
                     "total_sections": len(leaves),
+                    "visualization_plan": self.visualization_plan.summary(self.task_id),
+                    "global_research_prepared": False,
                 }
                 draft["done"] = 0
                 draft["total"] = len(leaves)
@@ -193,64 +198,138 @@ class FullPaperGenerationService:
         self._insert_reference_for_block(section_id, block_id)
         return block_id
 
-    def _research_for_section(self, section: dict, model_id: str | None) -> None:
-        """Run the existing research-visualization pipeline and insert formal blocks.
-
-        A user has already authorized this work by starting one-click generation.
-        Candidates remain provenance-gated; this orchestration only bypasses the
-        *manual UI confirmation* and never the evidence or freshness checks.
-        """
-        section_id = str(section["id"])
-        section_label = f"{section.get('number', '')} {section.get('title', '')}".strip()
-        self._checkpoint("research_planning", f"正在分析 {section_label} 是否需要研究表图", section_id=section_id)
+    def _prepare_global_research(self, model_id: str | None) -> None:
+        """Search and verify task-level sources once before any section executes."""
         state = self._state(self.draft_service.load())
-        if section_id in set(state.get("research_section_ids") or []):
+        if state.get("global_research_prepared"):
             return
-        plan = self.research.plan(self.task_id) if (self.research.root / "plans" / f"{self.task_id}.json").exists() else self.research.create_plan(
+        draft = self.draft_service.load()
+        sections = draft.get("sections") or []
+        research_question = "；".join(
+            str(section.get("gist") or section.get("title") or "")
+            for section in sections
+            if section.get("id")
+        )[:1200]
+        if not self._checkpoint("research_planning", "正在为全文规划唯一的研究资料与证据", progress=7):
+            return
+        plan = self.research.create_plan(
             task_id=self.task_id,
-            topic=self.draft_service.load().get("title") or section.get("title") or "研究主题",
-            chapter=section_label,
-            research_question=str(section.get("gist") or ""),
+            topic=draft.get("title") or "研究主题",
+            chapter="全文级研究资料规划",
+            research_question=research_question,
             model_id=model_id,
         )
-        self._checkpoint("research_search", f"正在检索 {section_label} 的公开学术资料", section_id=section_id)
+        if not self._checkpoint("research_search", "正在一次性检索全文所需公开学术资料", progress=8):
+            return
         search = self.research.search(task_id=self.task_id, limit=5)
-        sources = list(search.get("results") or [])[:8]
+        sources = list(search.get("results") or [])[:12]
         if sources:
             self.research.save_sources(task_id=self.task_id, sources=sources)
-            self._checkpoint("evidence_verification", "正在提取并核验来源证据", section_id=section_id)
-            self.research.extract(task_id=self.task_id)
-        if not self._checkpoint("visualization_planning", "正在调用研究可视化流水线生成正式表图", section_id=section_id):
+        if not self._checkpoint("evidence_verification", "正在一次性提取并核验全文证据", progress=9):
             return
-        candidates = self.research.recommend(task_id=self.task_id, section=section_label)
-        candidates.extend(self.research.recommend_literature_trend(task_id=self.task_id, section=section_label))
-        ready = [item for item in candidates if item.get("status") == "ready" and item.get("kind") in {"table", "chart"}]
+        self.research.extract(task_id=self.task_id)
         self._save_state(
             status="running",
             stage="visualization_planning",
-            message=f"已找到 {len(ready)} 个可插入的研究表图候选，正在生成正式正文块",
-            current_section_id=section_id,
-            visualization_plan={
-                "section_id": section_id,
-                "candidate_count": len(ready),
-                "candidate_kinds": [str(item.get("kind")) for item in ready],
-                "candidate_titles": [str(item.get("title") or "") for item in ready],
-            },
+            message="全文资料与证据已准备完成，正在按章节唯一计划生成表图",
+            global_research_prepared=True,
+            global_research_plan_id=plan.get("id"),
+            visualization_plan=self.visualization_plan.summary(self.task_id),
         )
-        # Insert immediately after the chapter's generated body, rather than
-        # appending all research assets after the entire paper has finished.
+
+    @staticmethod
+    def _candidate_for_item(item: dict[str, Any], candidates: list[dict[str, Any]], claimed: set[str]) -> dict[str, Any] | None:
+        purpose = item.get("purpose")
+        for candidate in candidates:
+            candidate_id = str(candidate.get("id") or "")
+            if not candidate_id or candidate_id in claimed or candidate.get("status") != "ready":
+                continue
+            if candidate.get("kind") != item.get("asset_kind"):
+                continue
+            if purpose == "literature_review_table" and candidate.get("table_type") != "literature_review":
+                continue
+            if purpose == "literature_year_distribution" and candidate.get("title") != "已保存文献年度分布":
+                continue
+            if purpose == "technology_comparison" and candidate.get("table_type") != "technology_comparison":
+                continue
+            if purpose == "experimental_result":
+                chart = candidate.get("chart") or {}
+                dataset_ids = {str(value) for value in item.get("dataset_ids") or []}
+                if not dataset_ids.intersection({str(candidate.get("dataset_id") or ""), str(chart.get("dataset_id") or "")}):
+                    continue
+            claimed.add(candidate_id)
+            return candidate
+        return None
+
+    def _candidates_for_plan_items(self, items: list[dict[str, Any]], section_label: str) -> list[dict[str, Any]]:
+        """Materialise candidates only for the unique plan items owned by one section."""
+        candidates: list[dict[str, Any]] = []
+        purposes = {str(item.get("purpose")) for item in items}
+        if "literature_review_table" in purposes:
+            candidates.extend(self.research.recommend_literature_review(task_id=self.task_id, section=section_label))
+        if "literature_year_distribution" in purposes:
+            candidates.extend(self.research.recommend_literature_trend(task_id=self.task_id, section=section_label))
+        if "technology_comparison" in purposes:
+            candidates.extend(self.research.recommend(task_id=self.task_id, section=section_label))
+        for item in items:
+            if item.get("purpose") != "experimental_result" or not item.get("dataset_ids"):
+                continue
+            candidates.extend(self.research.recommend(
+                task_id=self.task_id,
+                section=section_label,
+                dataset_id=str(item["dataset_ids"][0]),
+                dataset_version=(item.get("dataset_versions") or [None])[0],
+                include_evidence_recommendations=False,
+                include_literature_fallback=False,
+            ))
+        return candidates
+
+    def _annotate_plan_block(self, section_id: str, block_id: str, item: dict[str, Any]) -> None:
+        """Make plan provenance available to the existing dependency/duplicate chain."""
+        with self.draft_service.lock:
+            draft = self.draft_service.load()
+            section = next((value for value in draft.get("sections") or [] if value.get("id") == section_id), None)
+            block = next((value for value in (section or {}).get("paragraphs") or [] if value.get("id") == block_id), None)
+            if block is None:
+                return
+            provenance = dict(block.get("research_visualization") or {})
+            provenance.update({
+                "visualization_plan_id": (self.visualization_plan.get(self.task_id) or {}).get("id"),
+                "visualization_plan_item_id": item.get("id"),
+                "source_signature": item.get("source_signature"),
+                "target_section_id": item.get("target_section_id"),
+                "purpose": item.get("purpose"),
+                "insertion_anchor": item.get("insertion_anchor"),
+            })
+            block["research_visualization"] = provenance
+            self.draft_service.save(draft)
+
+    def _execute_visualization_plan_for_section(self, section: dict, model_id: str | None) -> None:
+        """Generate and insert only this section's planned, unique formal blocks."""
+        section_id = str(section["id"])
+        section_label = f"{section.get('number', '')} {section.get('title', '')}".strip()
+        items = self.visualization_plan.items_for_section(self.task_id, section_id)
+        if not items:
+            return
+        if not self._checkpoint("visualization_planning", f"正在执行 {section_label} 的唯一表图计划", section_id=section_id):
+            return
+        candidates = self._candidates_for_plan_items(items, section_label)
         latest = self.draft_service.load()
-        latest_section = next((item for item in latest.get("sections") or [] if item.get("id") == section_id), section)
+        latest_section = next((value for value in latest.get("sections") or [] if value.get("id") == section_id), section)
         insert_index = len(latest_section.get("paragraphs") or [])
-        inserted_kinds: set[str] = set()
         inserted: list[dict[str, str]] = []
         failures: list[dict[str, str]] = []
-        for candidate in ready:
-            kind = str(candidate.get("kind") or "")
-            if kind in inserted_kinds:
-                continue
-            if not self._checkpoint("inserting_research", f"正在插入{('表格' if kind == 'table' else '图表')}到 {section_label}", section_id=section_id):
+        claimed: set[str] = set()
+        for item in items:
+            if not self._checkpoint("inserting_research", f"正在按计划插入 {section_label} 的研究表图", section_id=section_id):
                 return
+            candidate = self._candidate_for_item(item, candidates, claimed)
+            if not candidate:
+                self.visualization_plan.mark_skipped(self.task_id, str(item["id"]), "当前章节没有满足该计划项、且具有可核验来源的候选；正文将继续生成。")
+                continue
+            accepted, _ = self.visualization_plan.accept_candidate(self.task_id, str(item["id"]), candidate, self.draft_service.load())
+            if not accepted:
+                continue
             try:
                 result = self.research.insert(
                     candidate_id=str(candidate["id"]),
@@ -259,26 +338,25 @@ class FullPaperGenerationService:
                 )
                 block_id = self._record_insert(section_id, result)
                 block = ((result.get("inserted") or {}).get("block") or {})
-                if block_id:
-                    inserted_kinds.add(kind)
-                    insert_index += 1
-                    label = f"表{block.get('table_number')}" if kind == "table" else f"图{block.get('figure_number')}"
-                    inserted.append({"kind": kind, "block_id": block_id, "label": label, "title": str(block.get("title") or candidate.get("title") or "")})
-                    self._save_state(
-                        status="running",
-                        stage="inserting_research",
-                        message=f"已插入{label}：{block.get('title') or candidate.get('title') or '研究内容'}",
-                        current_section_id=section_id,
-                        visualization_insertions=inserted,
-                    )
-            except ValueError as exc:
-                failures.append({"candidate_id": str(candidate.get("id") or ""), "reason": str(exc)})
+                if not block_id:
+                    self.visualization_plan.mark_broken(self.task_id, str(item["id"]), "候选已生成，但未返回可插入的正式正文块。")
+                    continue
+                fresh_plan = self.visualization_plan.get(self.task_id) or {}
+                fresh_item = next((value for value in fresh_plan.get("items") or [] if value.get("id") == item.get("id")), item)
+                self._annotate_plan_block(section_id, block_id, fresh_item)
+                self.visualization_plan.mark_inserted(self.task_id, str(item["id"]), block_id)
+                insert_index += 1
+                label = f"表{block.get('table_number')}" if block.get("type") == "table" else f"图{block.get('figure_number')}"
+                inserted.append({"kind": str(block.get("type") or candidate.get("kind") or ""), "block_id": block_id, "label": label, "title": str(block.get("title") or candidate.get("title") or "")})
+            except Exception as exc:  # One visualization must never abort body generation.
+                failures.append({"plan_item_id": str(item.get("id") or ""), "candidate_id": str(candidate.get("id") or ""), "reason": str(exc)})
+                self.visualization_plan.mark_broken(self.task_id, str(item["id"]), f"表图生成或插入失败：{exc}")
         with self.draft_service.lock:
             draft = self.draft_service.load()
             state = dict(self._state(draft))
             state["research_section_ids"] = list(dict.fromkeys([*(state.get("research_section_ids") or []), section_id]))
-            state["last_research_plan_id"] = plan.get("id")
             state["visualization_insertions"] = inserted
+            state["visualization_plan"] = self.visualization_plan.summary(self.task_id)
             if failures:
                 state["visualization_failures"] = failures
             draft[PIPELINE_KEY] = state
@@ -291,8 +369,8 @@ class FullPaperGenerationService:
         before = {str(item.get("id")) for item in section.get("paragraphs") or []}
         self.draft_service.generate_section(section_id, model_id)
         self._mark_new_paragraphs(section_id, before)
-        if allow_research and self._section_needs_research(section, index):
-            self._research_for_section(section, model_id)
+        if allow_research:
+            self._execute_visualization_plan_for_section(section, model_id)
             if self._pause_requested():
                 return False
         with self.draft_service.lock:
@@ -346,7 +424,12 @@ class FullPaperGenerationService:
         selected_model = model_id or state.get("model_id")
         leaves = sorted([item for item in draft.get("sections") or [] if item.get("id") in _leaf_ids(draft.get("sections") or [])], key=lambda item: str(item.get("id")))
         completed = set(state.get("completed_section_ids") or [])
-        if not self._checkpoint("planning", "正在分析论文结构并规划章节任务", progress=5):
+        if not self._checkpoint("planning", "正在分析论文结构并规划全文唯一表图任务", progress=5):
+            return self.draft_service.load()
+        self.visualization_plan.build(self.task_id, draft)
+        self._save_state(status="running", stage="planning", message="全文可视化计划已建立，正在准备全局证据", visualization_plan=self.visualization_plan.summary(self.task_id))
+        self._prepare_global_research(selected_model)
+        if self._pause_requested():
             return self.draft_service.load()
         for index, section in enumerate(leaves, start=1):
             if str(section.get("id")) in completed:
@@ -366,7 +449,8 @@ class FullPaperGenerationService:
             draft = self.draft_service.load()
             stats = self.draft_service._refresh_word_stats(draft)
             state = dict(self._state(draft))
-            state.update(status="completed", stage="completed", message="全文生成完成", completed_at=_now(), progress=100)
+            self.visualization_plan.sync_candidate_statuses(self.task_id, self.research.candidates(self.task_id))
+            state.update(status="completed", stage="completed", message="全文生成完成", completed_at=_now(), progress=100, visualization_plan=self.visualization_plan.summary(self.task_id))
             draft[PIPELINE_KEY] = state
             draft.update(generating=False, progress=100 if stats["actual"] >= stats["minimum"] else 98, word_status="completed" if stats["actual"] >= stats["minimum"] else "shortfall")
             self.objects.renumber_document_references(self.task_id, draft)
@@ -384,6 +468,7 @@ class FullPaperGenerationService:
             section["paragraphs"] = kept
             state = dict(self._state(draft))
             state.update(status="running", stage="regenerating_section", message=f"正在重新生成 {section.get('number', '')} {section.get('title', '')}", current_section_id=section_id, updated_at=_now())
+            self.visualization_plan.reset_section(self.task_id, section_id)
             completed = set(state.get("completed_section_ids") or [])
             completed.discard(section_id)
             state["completed_section_ids"] = sorted(completed)
