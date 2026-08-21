@@ -86,14 +86,15 @@ export function buildInlineChartOption(spec: DraftChartSpec): EChartsCoreOption 
     yAxis,
     series: series.map((item, index) => {
       const useLine = spec.kind === "line" || (spec.kind === "mixed" && index > 0);
+      const useScatter = spec.kind === "scatter";
       return {
         name: item.name || `系列 ${index + 1}`,
-        type: useLine ? "line" : "bar",
+        type: useScatter ? "scatter" : (useLine ? "line" : "bar"),
         yAxisIndex: hasRightAxis && item.axis === "right" ? 1 : 0,
         data: numberValues(item.values),
         smooth: useLine,
-        symbol: useLine ? "circle" : undefined,
-        symbolSize: useLine ? 6 : undefined,
+        symbol: useLine || useScatter ? "circle" : undefined,
+        symbolSize: useLine || useScatter ? 7 : undefined,
         barMaxWidth: useLine ? undefined : 46,
         emphasis: { focus: "series" },
       };

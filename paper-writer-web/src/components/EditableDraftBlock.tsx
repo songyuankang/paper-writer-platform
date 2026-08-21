@@ -3,6 +3,7 @@ import type { DraftParagraph } from "../api/paper";
 import EditableDraftChartBlock from "./EditableDraftChartBlock";
 import EditableInsightBlock from "./EditableInsightBlock";
 import EditableCrossReferenceBlock from "./EditableCrossReferenceBlock";
+import type { EditableChartSpec } from "./chartSpecEditorState";
 
 type BlockPatch = {
   text?: string;
@@ -26,6 +27,7 @@ type Props = {
   canMoveDown: boolean;
   onChartUpdate?: (patch: { title?: string; caption?: string; display_scale?: number }) => Promise<void> | void;
   onRegenerateChart?: () => Promise<void> | void;
+  onChartSpecUpdate?: (chartSpec: EditableChartSpec) => Promise<void> | void;
 };
 
 const BTN = "rounded border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-600 transition hover:border-black hover:text-black disabled:opacity-40";
@@ -109,13 +111,14 @@ export default function EditableDraftBlock({
   canMoveDown,
   onChartUpdate,
   onRegenerateChart,
+  onChartSpecUpdate,
 }: Props) {
   const [editing, setEditing] = useState(false);
   if (block.type === "insight") {
     return <EditableInsightBlock block={block} index={index} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "chart") {
-    return <EditableDraftChartBlock taskId={taskId} block={block} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
+    return <EditableDraftChartBlock taskId={taskId} block={block} onUpdate={onChartUpdate} onRegenerate={onRegenerateChart} onChartSpecUpdate={onChartSpecUpdate} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;
   }
   if (block.type === "cross_reference") {
     return <EditableCrossReferenceBlock taskId={taskId} block={block} onRefresh={onRefresh || (async () => undefined)} onDelete={onDelete} onMove={onMove} canMoveUp={canMoveUp} canMoveDown={canMoveDown} />;

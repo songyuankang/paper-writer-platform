@@ -591,7 +591,7 @@ export interface DraftChartSeries {
 }
 export interface DraftChartSpec {
   schema_version: 1 | 2;
-  kind: "bar" | "line" | "mixed" | "pie";
+  kind: "bar" | "line" | "mixed" | "pie" | "scatter" | "area" | "boxplot" | "histogram" | "heatmap" | "combo";
   title: string;
   caption: string;
   categories?: string[];
@@ -599,6 +599,7 @@ export interface DraftChartSpec {
   pie?: Array<{ name: string; value: number }>;
   data?: { categories: string[]; series: DraftChartSeries[]; pie?: Array<{ name: string; value: number }> };
   binding?: { dataset_id?: string; dataset_version?: number; source_table_id?: string; data_fingerprint?: string };
+  appearance?: { template?: string; theme?: string; legend?: boolean; value_labels?: boolean; grid?: boolean; palette?: string[]; font_size?: number; x_label?: string; y_label?: string };
 }
 export interface DraftChartAsset {
   id: string;
@@ -1300,6 +1301,13 @@ export async function regenerateDraftChart(taskId: string, blockId: string, para
 }
 export async function updateDraftChart(taskId: string, blockId: string, params: DraftChartPatchParams): Promise<DraftParagraph> {
   const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) });
+  if (!res.ok) throw await toError(res);
+  return res.json();
+}
+
+/** 保存正文内 Chart Editor 的结构化 ChartSpec；ECharts option 永不写入后端。 */
+export async function updateDraftChartSpec(taskId: string, blockId: string, chartSpec: DraftChartSpec): Promise<DraftParagraph> {
+  const res = await apiFetch(API_BASE + "/api/draft/" + taskId + "/chart/" + blockId + "/spec", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chart_spec: chartSpec }) });
   if (!res.ok) throw await toError(res);
   return res.json();
 }

@@ -40,9 +40,11 @@ from app.draft.chart_blocks import (
     ChartCreateRequest,
     ChartPatchRequest,
     ChartRegenerateRequest,
+    ChartSpecUpdateRequest,
     create_chart_block,
     patch_chart_block,
     regenerate_chart_block,
+    update_chart_spec_block,
 )
 from app.services import history_service
 from app.services.dataset_service import DatasetService
@@ -516,7 +518,16 @@ def patch_chart(task_id: str, block_id: str, body: ChartPatchRequest, request: R
     try:
         return patch_chart_block(_service(task_id, request), block_id, body)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/{task_id}/chart/{block_id}/spec")
+def update_chart_spec(task_id: str, block_id: str, body: ChartSpecUpdateRequest, request: Request):
+    """保存正文内编辑器的 ChartSpec，并从同一 spec 重建现有 PNG/SVG 资产。"""
+    try:
+        return update_chart_spec_block(_service(task_id, request), block_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{task_id}/chart/{block_id}/asset")

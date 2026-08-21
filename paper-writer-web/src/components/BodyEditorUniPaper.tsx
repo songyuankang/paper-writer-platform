@@ -12,6 +12,7 @@ import {
   createDraftInsight,
   regenerateDraftChart,
   updateDraftChart,
+  updateDraftChartSpec,
   deleteDraftParagraph,
   startDraftOneclick,
   pauseDraftOneclick,
@@ -31,6 +32,7 @@ import {
   updateDraftSection,
   type PaperDraft,
   type DraftSection,
+  type DraftChartSpec,
   type ModelConfig,
   type ReferenceCandidate,
 } from "../api/paper";
@@ -358,6 +360,17 @@ export default function BodyEditorUniPaper({
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "重新生成图表失败");
+    }
+  }
+
+  async function patchChartSpec(blockId: string, chartSpec: DraftChartSpec) {
+    setError(null);
+    try {
+      await updateDraftChartSpec(taskId, blockId, chartSpec);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存图表数据失败");
+      throw err;
     }
   }
 
@@ -979,6 +992,7 @@ export default function BodyEditorUniPaper({
 
           onChartUpdate={(id, patch) => void patchChart(id, patch)}
           onRegenerateChart={(id) => void regenerateChart(id)}
+                          onChartSpecUpdate={(id, chartSpec) => patchChartSpec(id, chartSpec)}
                           onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
                           onPatchPara={patchParagraph}
                           onDel={delPara}
@@ -1008,6 +1022,7 @@ export default function BodyEditorUniPaper({
                             onRefresh={async () => { await refresh(); }}
                             onChartUpdate={(id, patch) => void patchChart(id, patch)}
                             onRegenerateChart={(id) => void regenerateChart(id)}
+                          onChartSpecUpdate={(id, chartSpec) => patchChartSpec(id, chartSpec)}
                           onPatchBlock={(id, patch) => void patchContentBlock(id, patch)}
                             onPatchPara={patchParagraph}
                             onDel={delPara}
@@ -1245,6 +1260,7 @@ function LeafSection({
   onRefresh,
   onChartUpdate,
   onRegenerateChart,
+  onChartSpecUpdate,
   onPatchPara,
   onPatchBlock,
   onDel,
@@ -1264,6 +1280,7 @@ function LeafSection({
   onRefresh: () => Promise<void> | void;
   onChartUpdate: (id: string, patch: { title?: string; caption?: string; display_scale?: number }) => void;
   onRegenerateChart: (id: string) => void;
+  onChartSpecUpdate: (id: string, chartSpec: DraftChartSpec) => Promise<void>;
   onPatchPara: (pid: string, text: string) => void;
   onPatchBlock: (id: string, patch: { text?: string; title?: string; headers?: string[]; rows?: string[][] }) => void;
   onDel: (pid: string) => void;
@@ -1299,6 +1316,7 @@ function LeafSection({
             onRefresh={onRefresh}
             onChartUpdate={(patch) => onChartUpdate(p.id, patch)}
             onRegenerateChart={() => onRegenerateChart(p.id)}
+            onChartSpecUpdate={(chartSpec) => onChartSpecUpdate(p.id, chartSpec)}
             onDelete={() => onDel(p.id)}
             onMove={(direction) => onMove(p.id, direction)}
             canMoveUp={i > 0}

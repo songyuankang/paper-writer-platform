@@ -6,8 +6,9 @@ persisted before the block is returned to the UI.
 """
 from __future__ import annotations
 
+import math
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -16,9 +17,11 @@ from app.draft.chart_runtime import (
     create_chart_block_from_table,
     locate_block,
     now,
+    normalize_appearance,
     recompute_chart_block,
     render_chart_assets,
 )
+from app.services.dependency_graph_service import DependencyGraphService
 
 # ``mixed`` remains a legacy alias; all current kinds are rendered by the
 # single ChartRenderer in chart_runtime.
@@ -41,6 +44,16 @@ class ChartPatchRequest(BaseModel):
 class ChartRegenerateRequest(BaseModel):
     chart_kind: ChartKind | None = None
     illustrative: bool = False
+
+
+class ChartSpecUpdateRequest(BaseModel):
+    """正文内编辑器提交的完整 ChartSpec v2。
+
+    ResearchObject 编号、数据绑定和来源快照由既有领域对象维护，正文
+    编辑器只能修改图表语义数据及可视化外观，避免破坏交叉引用和血缘关系。
+    """
+
+    chart_spec: dict[str, Any]
 
 
 def _kind(value: str | None) -> str:
@@ -95,6 +108,145 @@ def _illustrative_block(chart_id: str, request: ChartCreateRequest) -> dict:
 
 def _asset_from_spec(service, chart_id: str, version: int, spec: dict) -> dict:
     return render_chart_assets(service.task_dir, chart_id, version, spec)
+
+
+def _finite_number(value: Any, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError(f"{field} 必须是有限数值")
+    return float(value)
+
+
+def _label(value: Any, field: str, limit: int = 100) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} 必须是文本")
+    cleaned = clean(value, limit)
+    if not cleaned:
+        raise ValueError(f"{field} 不能为空")
+    return cleaned
+
+
+def _manual_chart_spec(block: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate editable ChartSpec fields while preserving protected provenance.
+
+    The browser may edit the complete JSON document in advanced mode, but changes
+    to ``id``/``binding``/``provenance`` are rejected rather than silently
+    disconnecting an existing FigureBlock from its Dataset/Evidence lineage.
+    """
+    old = dict(block.get("chart_spec") or {})
+    if not isinstance(raw, dict):
+        raise ValueError("chart_spec 必须是对象")
+    if raw.get("schema_version") != 2:
+        raise ValueError("仅支持 schema_version 为 2 的 ChartSpec")
+    chart_id = str(block.get("id") or "")
+    if raw.get("id") not in {None, chart_id}:
+        raise ValueError("ChartSpec 的 id 必须与当前图表一致")
+    old_binding = old.get("binding") or {}
+    old_provenance = old.get("provenance") or {}
+    if "binding" in raw and raw.get("binding") != old_binding:
+        raise ValueError("数据绑定由既有数据追踪保护，当前正文编辑器不可修改")
+    if "provenance" in raw and raw.get("provenance") != old_provenance:
+        raise ValueError("来源追踪由既有研究对象保护，当前正文编辑器不可修改")
+
+    kind = _kind(raw.get("kind"))
+    if raw.get("kind") not in {"bar", "line", "pie", "scatter", "area", "boxplot", "histogram", "heatmap", "combo", "mixed"}:
+        raise ValueError("不支持的图表类型")
+    data = raw.get("data")
+    if not isinstance(data, dict):
+        raise ValueError("chart_spec.data 必须是对象")
+
+    categories = data.get("categories")
+    series = data.get("series")
+    if kind == "pie":
+        pie = data.get("pie")
+        if not isinstance(pie, list) or not (1 <= len(pie) <= 80):
+            raise ValueError("饼图需要 1 至 80 个数据项")
+        normalized_pie = []
+        for index, item in enumerate(pie):
+            if not isinstance(item, dict):
+                raise ValueError("饼图数据项必须是对象")
+            normalized_pie.append({
+                "name": _label(item.get("name"), f"第 {index + 1} 个类别", 80),
+                "value": _finite_number(item.get("value"), f"第 {index + 1} 个数值"),
+            })
+        normalized_categories = [item["name"] for item in normalized_pie]
+        normalized_series = [{"name": "数值", "values": [item["value"] for item in normalized_pie], "axis": "left"}]
+        normalized_data = {"categories": normalized_categories, "series": normalized_series, "pie": normalized_pie}
+    else:
+        if not isinstance(categories, list) or not (1 <= len(categories) <= 80):
+            raise ValueError("类别必须为 1 至 80 项的数组")
+        if not isinstance(series, list) or not (1 <= len(series) <= 8):
+            raise ValueError("系列必须为 1 至 8 项的数组")
+        normalized_categories = [_label(item, f"第 {index + 1} 个类别", 80) for index, item in enumerate(categories)]
+        normalized_series = []
+        for index, item in enumerate(series):
+            if not isinstance(item, dict):
+                raise ValueError("系列必须是对象")
+            values = item.get("values")
+            if not isinstance(values, list) or len(values) != len(normalized_categories):
+                raise ValueError("每个系列的数值数量必须与类别数量一致")
+            axis = item.get("axis", "left")
+            if axis not in {"left", "right"}:
+                raise ValueError("系列坐标轴只能为 left 或 right")
+            normalized_series.append({
+                "name": _label(item.get("name"), f"第 {index + 1} 个系列名称", 80),
+                "values": [_finite_number(value, f"第 {index + 1} 个系列数值") for value in values],
+                "axis": axis,
+            })
+        normalized_data = {"categories": normalized_categories, "series": normalized_series}
+
+    title = _label(raw.get("title", block.get("title") or "图表"), "图表标题")
+    caption_raw = raw.get("caption", block.get("caption") or "")
+    if not isinstance(caption_raw, str):
+        raise ValueError("图注必须是文本")
+    appearance = normalize_appearance(raw.get("appearance") if isinstance(raw.get("appearance"), dict) else old.get("appearance"), kind)
+    return {
+        "id": chart_id,
+        "schema_version": 2,
+        "kind": kind,
+        "title": title,
+        "caption": clean(caption_raw, 180),
+        "binding": old_binding,
+        "data": normalized_data,
+        "appearance": appearance,
+        "provenance": old_provenance,
+    }
+
+
+def update_chart_spec_block(service, block_id: str, request: ChartSpecUpdateRequest) -> dict:
+    """Persist a manual ChartSpec edit and regenerate the existing ChartAsset.
+
+    The FigureBlock ID and formal figure number remain untouched, so all existing
+    ResearchObject/CrossReference records continue to resolve to this same block.
+    """
+    with service.lock:
+        draft = service.load()
+        _, block = locate_block(draft, block_id)
+        if block.get("type") != "chart":
+            raise ValueError("目标内容块不是图表")
+        spec = _manual_chart_spec(block, request.chart_spec)
+        version = int(block.get("version") or 0) + 1
+        block.update({
+            "status": "ready",
+            "version": version,
+            "title": spec["title"],
+            "caption": spec["caption"],
+            "chart_spec": spec,
+            "chart": {"schema_version": 2, "kind": spec["kind"], "title": spec["title"], "caption": spec["caption"], **spec["data"]},
+            "asset": _asset_from_spec(service, str(block["id"]), version, spec),
+            "manual_data_override": True,
+            "stale_reason": None,
+            "updated_at": now(),
+        })
+        service.save(draft)
+        # DependencyGraph is derived from authoritative draft records. Rebuild it
+        # after persistence so its existing FigureBlock node continues to point at
+        # the current Dataset/Evidence linkage without changing ResearchObject IDs.
+        try:
+            DependencyGraphService(service._storage_settings()).rebuild_task(service.task_id)
+        except (OSError, ValueError):
+            # Graph rebuilding is recoverable and must not discard a valid chart edit.
+            pass
+        return block
 
 
 def create_chart_block(service, section_id: str, request: ChartCreateRequest) -> dict:

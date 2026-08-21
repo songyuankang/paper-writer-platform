@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchDraftChartAsset, type DraftParagraph } from "../api/paper";
 import InlineChartRenderer from "./InlineChartRenderer";
 import { hasRenderableChartSpec } from "./inlineChartOption";
+import ChartEditorDrawer from "./ChartEditorDrawer";
+import type { EditableChartSpec } from "./chartSpecEditorState";
 
 type ChartPatch = { title?: string; caption?: string; display_scale?: number };
 
@@ -10,6 +12,7 @@ type Props = {
   block: DraftParagraph;
   onUpdate?: (patch: ChartPatch) => Promise<void> | void;
   onRegenerate?: () => Promise<void> | void;
+  onChartSpecUpdate?: (chartSpec: EditableChartSpec) => Promise<void> | void;
   onDelete: () => void;
   onMove: (direction: "up" | "down") => void;
   canMoveUp: boolean;
@@ -100,9 +103,10 @@ function ChartAsset({ taskId, block }: { taskId: string; block: DraftParagraph }
   return <FallbackCanvas block={block} />;
 }
 
-export default function EditableDraftChartBlock({ taskId, block, onUpdate, onRegenerate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
+export default function EditableDraftChartBlock({ taskId, block, onUpdate, onRegenerate, onChartSpecUpdate, onDelete, onMove, canMoveUp, canMoveDown }: Props) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [dynamicRenderFailed, setDynamicRenderFailed] = useState(false);
   const [title, setTitle] = useState(text(block.title, "图表"));
@@ -110,7 +114,7 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
   const scale = block.display_scale ?? 0.75;
   const chart = chartData(block);
   const provenance = block.provenance === "user_provided" ? "来源：论文数据表" : block.provenance === "model_generated" ? "来源：模型生成" : "数据示意";
-  const label = useMemo(() => ({ bar: "柱状图", line: "折线图", mixed: "柱线混合图", pie: "饼图" }[chart.kind] || "图表"), [chart.kind]);
+  const label = useMemo(() => ({ bar: "柱状图", line: "折线图", mixed: "柱线混合图", combo: "柱线混合图", pie: "饼图", scatter: "散点图", area: "面积图", boxplot: "箱线图", histogram: "直方图", heatmap: "热力图" }[chart.kind] || "图表"), [chart.kind]);
   const figureNumber = typeof block.figure_number === "number" && block.figure_number > 0 ? `图${block.figure_number}` : "图（待编号）";
   const stale = block.status === "stale";
   const research = block.research_visualization;
@@ -131,6 +135,7 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
     <div className="flex flex-wrap items-center gap-2 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
       <span className="font-medium text-neutral-800">{label}</span><span className="text-neutral-300">|</span>
       {shouldRenderDynamic && <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">动态渲染</span>}
+      <button type="button" onClick={() => setEditorOpen(true)} disabled={busy} className="rounded px-2 py-1 font-medium text-neutral-800 hover:bg-neutral-200 disabled:opacity-50">编辑图表</button>
       <button type="button" onClick={regenerate} disabled={busy} className="rounded px-2 py-1 hover:bg-neutral-200 disabled:opacity-50">{busy ? "计算中…" : stale ? "↻ 重新计算" : "↻ 重新计算"}</button>
       <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">{research ? "来源已追溯" : provenance}</span>
       {research && <button type="button" onClick={() => setShowSources((value) => !value)} className="rounded px-2 py-1 text-blue-700 hover:bg-blue-50">{showSources ? "收起来源" : "查看来源"}</button>}
@@ -139,7 +144,7 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
       <select aria-label="图表比例" value={scale} disabled={busy} onChange={(event) => void savePatch({ display_scale: Number(event.target.value) })} className="rounded border border-neutral-300 bg-white px-2 py-1">
         {SCALE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
       </select>
-      <button type="button" aria-label="编辑图表" onClick={() => setEditing((value) => !value)} className="rounded px-2 py-1 hover:bg-neutral-200">✎</button>
+      <button type="button" aria-label="快速编辑图题和图注" onClick={() => setEditing((value) => !value)} className="rounded px-2 py-1 hover:bg-neutral-200">图题</button>
       <button type="button" aria-label="上移图表" onClick={() => onMove("up")} disabled={!canMoveUp} className="rounded px-2 py-1 hover:bg-neutral-200 disabled:opacity-30">↑</button>
       <button type="button" aria-label="下移图表" onClick={() => onMove("down")} disabled={!canMoveDown} className="rounded px-2 py-1 hover:bg-neutral-200 disabled:opacity-30">↓</button>
       <button type="button" aria-label="删除图表" onClick={onDelete} className="rounded px-2 py-1 text-red-600 hover:bg-red-50">⌫</button>
@@ -148,5 +153,6 @@ export default function EditableDraftChartBlock({ taskId, block, onUpdate, onReg
     {showSources && research && <section className="border-b border-blue-100 bg-blue-50/50 px-4 py-3 text-xs text-neutral-700"><div className="grid gap-3 sm:grid-cols-2"><div><p className="font-medium text-neutral-900">数据与生成方式</p><p className="mt-1">{researchSourceLabel}</p><p className="mt-1">{research.derivation || "基于已保存、可追溯资料生成图表"}</p></div><div><p className="font-medium text-neutral-900">证据与引用</p><p className="mt-1">已关联 {evidenceCount} 条可核验证据；引用会随论文编号自动更新。</p><a href={`/research/${taskId}/data`} className="mt-1 inline-block text-blue-700 underline underline-offset-2">查看数据中心</a></div></div>{sourceTitles.length > 0 && <div className="mt-3 border-t border-blue-100 pt-2"><p className="font-medium text-neutral-900">文献/公开资料来源</p><ul className="mt-1 list-disc space-y-1 pl-4">{sourceTitles.map((title) => <li key={title}>{title}</li>)}</ul></div>}</section>}
     {editing && <div className="grid gap-3 border-b border-neutral-200 bg-white px-4 py-3 sm:grid-cols-2"><label className="text-xs text-neutral-600">图表标题<input value={title} maxLength={80} onChange={(event) => setTitle(event.target.value)} onBlur={() => void savePatch({ title })} className="mt-1 w-full rounded border border-neutral-300 px-2 py-1.5 text-sm text-neutral-900" /></label><label className="text-xs text-neutral-600">图注<textarea value={caption} maxLength={180} onChange={(event) => setCaption(event.target.value)} onBlur={() => void savePatch({ caption })} className="mt-1 min-h-[60px] w-full rounded border border-neutral-300 px-2 py-1.5 text-sm text-neutral-900" /></label></div>}
     <div className="mx-auto" style={{ width: String(scale * 100) + "%", minWidth: "min(100%, 560px)" }}><div className="px-5 pt-5 text-center"><h4 className="text-base font-semibold text-neutral-900">{block.title}</h4></div>{shouldRenderDynamic && block.chart_spec ? <InlineChartRenderer spec={block.chart_spec} title={text(block.title, "图表")} onRenderFailure={handleDynamicRenderFailure} /> : <ChartAsset taskId={taskId} block={block} />}<div className="px-5 pb-4 text-center"><p className="text-sm font-medium text-neutral-800">{figureNumber} {block.title}</p><p className="mt-1 text-xs text-neutral-500">{block.caption}</p>{!research && block.provenance !== "user_provided" && <p className="mt-1 text-xs text-amber-700">数据为模型/示意生成，未自动检索或核验外部来源。</p>}</div></div>
+    {editorOpen && <ChartEditorDrawer block={block} onClose={() => setEditorOpen(false)} onSave={async (chartSpec) => { if (!onChartSpecUpdate) throw new Error("当前图表不支持结构化编辑"); await onChartSpecUpdate(chartSpec); }} />}
   </article>;
 }
