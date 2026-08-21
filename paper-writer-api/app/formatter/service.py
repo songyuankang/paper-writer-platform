@@ -12,6 +12,10 @@ from app.services import content_quality_guard, revise_service
 logger = logging.getLogger(__name__)
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
+# 临时开放导出：保留质量审计与规范化，但不再因 blockers 阻断 DOCX 输出。
+# 恢复门禁时将该开关改回 True。
+EXPORT_QUALITY_GATE_BLOCKING = False
+
 
 def spec_from_paper_content(paper_info: dict, content_dir: Path) -> dict:
     """把 paper_content 目录转换为 paper_spec.json（markdown/json → spec）。"""
@@ -66,10 +70,14 @@ def format_paper(task_id: str, task_dir: Path, paper_info: dict, spec: dict,
                  build_docx: bool = True) -> list[str]:
     """同步内容、执行质量门禁，并在需要时按模板渲染 Word。"""
     spec, guard = content_quality_guard.prepare_spec_for_export(spec)
+    guard["blocking_enabled"] = EXPORT_QUALITY_GATE_BLOCKING
+    if guard["blockers"] and not EXPORT_QUALITY_GATE_BLOCKING:
+        guard["bypassed_blockers"] = list(guard["blockers"])
+        logger.warning("导出质量门禁当前已临时关闭，放行 %d 个 blocker", len(guard["blockers"]))
     (task_dir / "export_guard.json").write_text(
         json.dumps(guard, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    if guard["blockers"]:
+    if guard["blockers"] and EXPORT_QUALITY_GATE_BLOCKING:
         details = "；".join(item["message"] for item in guard["blockers"])
         raise content_quality_guard.ExportQualityError(
             f"导出前质量门禁未通过：{details}"

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import json
+
 import pytest
 
 from app.formatter.service import format_paper
@@ -38,7 +40,7 @@ def test_export_guard_normalizes_reference_numbers_and_source_text(tmp_path: Pat
     assert normalized["sections"][1]["text"] == "数据来源：公开数据。"
 
 
-def test_format_service_blocks_bad_content_before_word_export(tmp_path: Path) -> None:
+def test_format_service_temporarily_allows_bad_content_and_keeps_audit(tmp_path: Path) -> None:
     spec = {
         "meta": {"title": "测试", "abstract": "摘要", "keywords": ["测试"]},
         "sections": [
@@ -48,10 +50,13 @@ def test_format_service_blocks_bad_content_before_word_export(tmp_path: Path) ->
         ],
         "references": [],
     }
-    with pytest.raises(content_quality_guard.ExportQualityError):
-        format_paper("guard-test", tmp_path, {"title": "测试"}, spec, build_docx=True)
+    files = format_paper("guard-test", tmp_path, {"title": "测试"}, spec, build_docx=True)
+    report = json.loads((tmp_path / "export_guard.json").read_text(encoding="utf-8"))
     assert (tmp_path / "export_guard.json").exists()
-    assert not list(tmp_path.glob("*.docx"))
+    assert list(tmp_path.glob("*.docx"))
+    assert "export_guard.json" in files
+    assert report["blocking_enabled"] is False
+    assert report["bypassed_blockers"]
 
 
 def test_export_guard_removes_unresolved_table_and_figure_references() -> None:
