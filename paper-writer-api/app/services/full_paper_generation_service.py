@@ -89,7 +89,6 @@ class FullPaperGenerationService:
                 old.update(status="running", stage="resuming", message="正在恢复全文生成", model_id=model_id or old.get("model_id"), resumed_at=_now(), updated_at=_now())
             else:
                 leaves = sorted(_leaf_ids(draft.get("sections") or []))
-                visualization_plan = self.visualization_plan.build(self.task_id, draft, replace=True)
                 old = {
                     "version": 1,
                     "status": "running",
@@ -103,7 +102,7 @@ class FullPaperGenerationService:
                     "inserted_block_ids": [],
                     "errors": [],
                     "total_sections": len(leaves),
-                    "visualization_plan": self.visualization_plan.summary(self.task_id),
+                    "visualization_plan": self.visualization_plan.preparing_summary(),
                     "global_research_prepared": False,
                 }
                 draft["done"] = 0
@@ -228,6 +227,9 @@ class FullPaperGenerationService:
         if not self._checkpoint("evidence_verification", "正在一次性提取并核验全文证据", progress=9):
             return
         self.research.extract(task_id=self.task_id)
+        # 计划必须基于已保存 Literature、已核验证据和已附加 DatasetVersion 建立。
+        # 不能在 start() 中预先冻结，否则会把资料尚未准备时的空结果写成最终计划。
+        finalized_plan = self.visualization_plan.build(self.task_id, self.draft_service.load(), replace=True)
         self._save_state(
             status="running",
             stage="visualization_planning",
@@ -235,6 +237,7 @@ class FullPaperGenerationService:
             global_research_prepared=True,
             global_research_plan_id=plan.get("id"),
             visualization_plan=self.visualization_plan.summary(self.task_id),
+            visualization_plan_id=finalized_plan.get("id"),
         )
 
     @staticmethod
@@ -426,8 +429,12 @@ class FullPaperGenerationService:
         completed = set(state.get("completed_section_ids") or [])
         if not self._checkpoint("planning", "正在分析论文结构并规划全文唯一表图任务", progress=5):
             return self.draft_service.load()
-        self.visualization_plan.build(self.task_id, draft)
-        self._save_state(status="running", stage="planning", message="全文可视化计划已建立，正在准备全局证据", visualization_plan=self.visualization_plan.summary(self.task_id))
+        self._save_state(
+            status="running",
+            stage="planning",
+            message="正在准备全文资料与证据，随后建立最终研究图表计划",
+            visualization_plan=self.visualization_plan.preparing_summary(),
+        )
         self._prepare_global_research(selected_model)
         if self._pause_requested():
             return self.draft_service.load()

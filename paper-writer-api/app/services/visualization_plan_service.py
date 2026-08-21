@@ -77,16 +77,102 @@ class VisualizationPlanService:
         return payload
 
     @staticmethod
+    def preparing_summary() -> dict[str, Any]:
+        """A truthful pre-plan state shown while global sources are still being prepared."""
+        return {
+            "status": "preparing",
+            "total_items": 0,
+            "planned_count": 0,
+            "generated_count": 0,
+            "ready_candidate_count": 0,
+            "inserted_count": 0,
+            "skipped_count": 0,
+            "stale_count": 0,
+            "broken_count": 0,
+            "items_summary": [],
+            "notices": ["正在准备全文资料与证据，尚未建立最终研究图表计划。"],
+        }
+
+    @staticmethod
     def _section_text(section: dict[str, Any]) -> str:
         return _clean(f"{section.get('number', '')} {section.get('title', '')} {section.get('gist', '')}", 1000)
 
+    _INTENT_RULES = {
+        "literature": {
+            "terms": ("文献综述", "研究现状", "国内外研究", "相关研究", "研究进展", "发展现状", "文献分析"),
+            "penalties": (),
+            "minimum": 12,
+        },
+        "technology": {
+            "terms": ("技术对比", "技术比较", "技术分析", "方案比较", "方法比较", "方法对比", "技术路线", "性能比较", "检测技术对比", "传统与深度学习", "baseline", "基线", "对比实验"),
+            "penalties": (),
+            "minimum": 12,
+        },
+        "experiment": {
+            "terms": ("实验结果", "实验分析", "性能验证", "性能评估", "实验验证", "对比实验", "消融实验", "结果分析", "性能对比", "baseline对比", "baseline", "基线", "准确率", "召回率", "f1", "auc"),
+            "penalties": ("实验环境", "环境", "配置", "参数设置", "超参数", "准备", "硬件平台"),
+            "minimum": 12,
+        },
+    }
+
     @classmethod
-    def _first_matching(cls, sections: list[dict[str, Any]], terms: tuple[str, ...]) -> dict[str, Any] | None:
-        for section in sections:
-            text = cls._section_text(section).lower()
-            if any(term.lower() in text for term in terms):
-                return section
-        return None
+    def _section_context(cls, section: dict[str, Any], by_id: dict[str, dict[str, Any]], leaves: list[dict[str, Any]]) -> tuple[str, str]:
+        """Return ancestor and adjacent context for intent scoring without changing Draft sections."""
+        section_id = str(section.get("id") or "")
+        parts = section_id.split("-")
+        parents = [by_id.get("-".join(parts[:index])) for index in range(1, len(parts))]
+        ancestor_text = " ".join(cls._section_text(parent) for parent in parents if parent)
+        try:
+            position = next(index for index, value in enumerate(leaves) if value.get("id") == section_id)
+        except StopIteration:
+            return ancestor_text, ""
+        neighbors = leaves[max(0, position - 1): position] + leaves[position + 1: position + 2]
+        neighbor_text = " ".join(cls._section_text(value) for value in neighbors)
+        return ancestor_text, neighbor_text
+
+    @classmethod
+    def _intent_score(cls, section: dict[str, Any], intent: str, *, ancestor_text: str, neighbor_text: str) -> int:
+        rule = cls._INTENT_RULES[intent]
+        title = _normal(section.get("title"))
+        gist = _normal(section.get("gist"))
+        context = _normal(ancestor_text)
+        neighbor = _normal(neighbor_text)
+        score = 2 if int(section.get("level") or 0) >= 3 else 0
+        for term in rule["terms"]:
+            needle = _normal(term)
+            if not needle:
+                continue
+            if needle in title:
+                score += 30
+            elif needle in gist:
+                score += 16
+            elif needle in context:
+                score += 10
+            elif needle in neighbor:
+                score += 4
+        for term in rule["penalties"]:
+            needle = _normal(term)
+            if not needle:
+                continue
+            if needle in title:
+                score -= 24
+            elif needle in gist:
+                score -= 12
+            elif needle in context:
+                score -= 4
+        return score
+
+    @classmethod
+    def _best_intent_section(cls, sections: list[dict[str, Any]], intent: str, by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for index, section in enumerate(sections):
+            ancestor_text, neighbor_text = cls._section_context(section, by_id, sections)
+            score = cls._intent_score(section, intent, ancestor_text=ancestor_text, neighbor_text=neighbor_text)
+            candidates.append((score, -index, section))
+        if not candidates:
+            return None
+        score, _, section = max(candidates, key=lambda item: (item[0], item[1]))
+        return section if score >= int(cls._INTENT_RULES[intent]["minimum"]) else None
 
     def _experiment_dataset(self, task_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
         """Return only a task-owned DatasetVersion with two numeric fields."""
@@ -136,34 +222,43 @@ class VisualizationPlanService:
         }
 
     def build(self, task_id: str, draft: dict[str, Any], *, replace: bool = False) -> dict[str, Any]:
-        """Create one deterministic plan for the whole paper, or reuse it on resume."""
+        """Build the final whole-paper plan after sources and datasets are available."""
         existing = self.get(task_id)
-        if existing and not replace:
+        if existing and existing.get("finalized") and not replace:
             return existing
         all_sections = [section for section in _walk_sections(draft.get("sections") or []) if section.get("id")]
-        section_ids = {str(section["id"]) for section in all_sections}
-        sections = [
+        by_id = {str(section["id"]): section for section in all_sections}
+        section_ids = set(by_id)
+        leaves = [
             section for section in all_sections
             if not any(other_id.startswith(f"{section['id']}-") for other_id in section_ids)
         ]
-        literature = self._first_matching(sections, ("文献综述", "研究现状", "相关研究", "国内外", "综述"))
-        experiment = self._first_matching(sections, ("实验结果", "实验", "实证", "测试结果", "结果分析"))
-        technical = self._first_matching(sections, ("技术比较", "技术分析", "方案比较", "方法比较", "技术路线", "性能比较"))
+        literature = self._best_intent_section(leaves, "literature", by_id)
+        technical = self._best_intent_section(leaves, "technology", by_id)
+        experiment = self._best_intent_section(leaves, "experiment", by_id)
+        dataset = self._experiment_dataset(task_id) if experiment else None
+        notices: list[str] = []
         items: list[dict[str, Any]] = []
         if literature:
             items.append(self._item(section=literature, purpose="literature_review_table", asset_kind="table", table_type="literature_review"))
             items.append(self._item(section=literature, purpose="literature_year_distribution", asset_kind="chart", chart_kind="bar"))
         if technical:
             items.append(self._item(section=technical, purpose="technology_comparison", asset_kind="table", table_type="technology_comparison"))
-        dataset = self._experiment_dataset(task_id) if experiment else None
         if experiment and dataset:
             _, version = dataset
             items.append(self._item(section=experiment, purpose="experimental_result", asset_kind="chart", chart_kind="scatter", dataset=version))
+        elif experiment:
+            notices.append("实验图已跳过：尚未添加研究数据。")
+        if not literature:
+            notices.append("未识别适合插入文献综述表的章节。")
+        if not technical:
+            notices.append("未识别适合插入技术比较表的章节。")
         plan = {
             "schema_version": 1,
             "id": f"vplan_{uuid.uuid4().hex[:16]}",
             "task_id": task_id,
-            "status": "planned",
+            "status": "planned" if items else "completed",
+            "finalized": True,
             "created_at": _now(),
             "updated_at": _now(),
             "source": "full_paper_generation",
@@ -173,7 +268,8 @@ class VisualizationPlanService:
                 "literature_section_id": literature.get("id") if literature else None,
                 "technical_section_id": technical.get("id") if technical else None,
                 "experiment_section_id": experiment.get("id") if experiment else None,
-                "notes": "未识别明确章节目的或缺少真实数据时，不建立可视化计划项。",
+                "notices": notices,
+                "notes": "计划在全文资料、证据和已附加研究数据准备完成后建立；没有真实数据时不生成实验定量图。",
             },
         }
         return self._write(task_id, plan)
@@ -323,9 +419,37 @@ class VisualizationPlanService:
         plan = self.get(task_id)
         if not plan:
             return None
+        items = list(plan.get("items") or [])
+        counts = {status: sum(1 for item in items if item.get("status") == status) for status in PLAN_STATUSES}
+        item_summaries: list[dict[str, Any]] = []
+        for item in items:
+            events = item.get("events") or []
+            source_ids = {str(value) for value in item.get("evidence_ids") or []}
+            source_ids.update(f"dataset:{value}" for value in item.get("dataset_ids") or [])
+            item_summaries.append({
+                "id": item.get("id"),
+                "target_section_id": item.get("target_section_id"),
+                "purpose": item.get("purpose"),
+                "asset_kind": item.get("asset_kind"),
+                "status": item.get("status"),
+                "reason": (events[-1] or {}).get("reason", "") if events else "",
+                "candidate_id": item.get("candidate_id"),
+                "inserted_block_id": item.get("inserted_block_id"),
+                "source_count": len(source_ids),
+            })
+        stored = plan.get("summary") or {}
         return {
             "id": plan.get("id"),
             "status": plan.get("status"),
-            "total_items": len(plan.get("items") or []),
-            "items": [{key: item.get(key) for key in ("id", "status", "target_section_id", "purpose", "asset_kind", "chart_kind", "table_type", "insertion_anchor", "candidate_id", "inserted_block_id")} for item in plan.get("items") or []],
+            "total_items": len(items),
+            "planned_count": counts["planned"],
+            "generated_count": counts["generated"],
+            "ready_candidate_count": counts["generated"],
+            "inserted_count": counts["inserted"],
+            "skipped_count": counts["skipped"],
+            "stale_count": counts["stale"],
+            "broken_count": counts["broken"],
+            "notices": list(stored.get("notices") or []),
+            "items_summary": item_summaries,
+            "items": [{key: item.get(key) for key in ("id", "status", "target_section_id", "purpose", "asset_kind", "chart_kind", "table_type", "insertion_anchor", "candidate_id", "inserted_block_id")} for item in items],
         }

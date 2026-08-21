@@ -649,10 +649,28 @@ export interface FullPaperPipelineState {
   progress?: number;
   error?: string;
   visualization_plan?: {
-    section_id?: string;
-    candidate_count?: number;
-    candidate_kinds?: string[];
-    candidate_titles?: string[];
+    id?: string;
+    status?: "preparing" | "planned" | "running" | "completed";
+    total_items?: number;
+    planned_count?: number;
+    generated_count?: number;
+    ready_candidate_count?: number;
+    inserted_count?: number;
+    skipped_count?: number;
+    stale_count?: number;
+    broken_count?: number;
+    notices?: string[];
+    items_summary?: Array<{
+      id?: string;
+      target_section_id?: string;
+      purpose?: string;
+      asset_kind?: "table" | "chart";
+      status?: "planned" | "generated" | "inserted" | "skipped" | "stale" | "broken";
+      reason?: string;
+      candidate_id?: string;
+      inserted_block_id?: string;
+      source_count?: number;
+    }>;
   };
   visualization_insertions?: Array<{
     kind: "table" | "chart";

@@ -4,6 +4,7 @@ import EditableDraftBlock from "./EditableDraftBlock";
 import OneClickConfirmModal from "./OneClickConfirmModal";
 import HistoryPage from "../pages/History";
 import SettingsModels from "../pages/SettingsModels";
+import { visualizationPlanStatus } from "./visualizationPlanStatus";
 import {
   addDraftParagraph,
   updateDraftBlock,
@@ -484,6 +485,7 @@ export default function BodyEditorUniPaper({
   const pipeline = draft.full_paper_pipeline;
   const pipelinePaused = pipeline?.status === "paused";
   const pipelineRunning = draft.generating || pipeline?.status === "running" || pipeline?.status === "pause_requested";
+  const visualizationStatus = visualizationPlanStatus(pipeline, pipelineRunning);
 
   return (
     <div className="flex min-h-screen flex-col bg-white text-neutral-900">
@@ -531,11 +533,12 @@ export default function BodyEditorUniPaper({
           </span>
         )}
         {pipelinePaused && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs text-amber-700">已暂停：{pipeline?.message || "可继续生成"}</span>}
-        {(pipelineRunning || pipeline?.status === "completed") && (pipeline?.visualization_plan || (pipeline?.visualization_insertions?.length ?? 0) > 0) && (
-          <span className="hidden max-w-[360px] items-center gap-1 truncate text-[11px] text-emerald-700 lg:flex" title={pipeline?.visualization_insertions?.map((item) => `${item.label} ${item.title}`).join("；") || pipeline?.visualization_plan?.candidate_titles?.join("；")}>
-            {pipeline?.visualization_insertions?.length
-              ? <>已插入 {pipeline.visualization_insertions.map((item) => item.label).join("、")}</>
-              : <>已找到 {pipeline?.visualization_plan?.candidate_count ?? 0} 个可插入研究表图</>}
+        {(pipelineRunning || pipeline?.status === "completed") && visualizationStatus && (
+          <span
+            className={`hidden max-w-[360px] items-center gap-1 truncate text-[11px] lg:flex ${visualizationStatus.tone === "warning" ? "text-amber-700" : visualizationStatus.tone === "neutral" ? "text-neutral-600" : "text-emerald-700"}`}
+            title={visualizationStatus.title}
+          >
+            {visualizationStatus.text}
           </span>
         )}
         <div className="flex-1" />

@@ -172,3 +172,110 @@ def test_full_pipeline_pause_and_resume_state_is_persisted(tmp_path: Path):
     resumed = pipeline.start(resume=True)
     assert resumed["status"] == "running"
     assert draft.load()["generating"] is True
+
+
+def semantic_plan_paper(settings: Settings) -> DraftService:
+    service = DraftService(TASK, settings.output_dir / TASK)
+    service.save({
+        "title": "基于深度学习的校园网络安全异常检测系统设计与实现",
+        "meta": {"paper_type": "毕业论文", "major": "计算机", "word_count": 800, "completion_min_chars": 300, "keywords": []},
+        "abstract": {"zh": "校园网络安全异常检测研究。", "en": ""},
+        "keywords": {"zh": ["网络安全"], "en": []},
+        "acknowledgement": "", "references": [], "outline_meta": {"confirmation_required": False, "confirmed": True},
+        "sections": [
+            {"id": "1-1", "number": "1.1", "title": "相关研究与发展现状", "level": 2, "gist": "梳理网络异常检测的研究进展", "paragraphs": []},
+            {"id": "2-1", "number": "2.1", "title": "传统与深度学习检测技术对比", "level": 2, "gist": "比较传统方法与深度学习方法的检测指标", "paragraphs": []},
+            {"id": "4-1-2", "number": "4.1.2", "title": "实验环境与超参数配置", "level": 3, "gist": "列出 GPU、框架与超参数设置", "paragraphs": []},
+            {"id": "4-2-1", "number": "4.2.1", "title": "与 Baseline 模型的性能对比", "level": 3, "gist": "呈现准确率、召回率、F1 和 AUC 的对比实验结果", "paragraphs": []},
+            {"id": "4-2-2", "number": "4.2.2", "title": "CNN 与 LSTM 模块的消融实验", "level": 3, "gist": "分析模块移除后的实验结果", "paragraphs": []},
+        ],
+        "generating": False, "progress": 0, "done": 0, "total": 5,
+    })
+    return service
+
+
+def seed_verified_literature(settings: Settings) -> LiteratureService:
+    literature = LiteratureService(settings)
+    for title, year, latency in [("Method A", 2021, 120), ("Method B", 2022, 95), ("Method C", 2023, 70)]:
+        literature.save(task_id=TASK, metadata={
+            "title": title, "authors": ["Author"], "year": year,
+            "abstract": f"{title} reported latency {latency} ms in a verified evaluation.",
+            "source": "crossref", "source_id": title, "external_id": title,
+        })
+    return literature
+
+
+def configure_pipeline_for_local_sources(pipeline: FullPaperGenerationService, draft: DraftService, literature: LiteratureService, monkeypatch) -> None:
+    monkeypatch.setattr(draft, "generate_section", fake_generate(draft))
+    monkeypatch.setattr(draft, "generate_en_abstract", lambda model_id=None: "English abstract")
+    monkeypatch.setattr(draft, "generate_acknowledgement", lambda model_id=None: "Acknowledgement")
+    monkeypatch.setattr(pipeline.research, "search", lambda **kwargs: {"results": [], "saved_literature": literature.list(TASK)})
+
+
+def test_final_plan_is_built_after_global_research_and_scores_semantic_sections(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    draft = semantic_plan_paper(settings)
+    literature = seed_verified_literature(settings)
+    pipeline = FullPaperGenerationService(draft)
+    configure_pipeline_for_local_sources(pipeline, draft, literature, monkeypatch)
+
+    started = pipeline.start()
+    assert started["visualization_plan"]["status"] == "preparing"
+    assert pipeline.visualization_plan.get(TASK) is None
+
+    completed = pipeline.run()
+    plan = pipeline.visualization_plan.get(TASK)
+    assert plan is not None and plan["finalized"] is True
+    by_purpose = {item["purpose"]: item for item in plan["items"]}
+    assert by_purpose["literature_review_table"]["target_section_id"] == "1-1"
+    assert by_purpose["literature_year_distribution"]["target_section_id"] == "1-1"
+    assert by_purpose["technology_comparison"]["target_section_id"] == "2-1"
+    assert "experimental_result" not in by_purpose
+    assert plan["summary"]["experiment_section_id"] == "4-2-1"
+    assert "实验图已跳过：尚未添加研究数据。" in plan["summary"]["notices"]
+    summary = completed["full_paper_pipeline"]["visualization_plan"]
+    assert summary["total_items"] == 3
+    assert summary["ready_candidate_count"] == 0
+    assert summary["inserted_count"] + summary["skipped_count"] + summary["broken_count"] == 3
+
+
+def test_dataset_version_materializes_ready_candidate_then_inserts_figureblock(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    draft = semantic_plan_paper(settings)
+    literature = seed_verified_literature(settings)
+    dataset = DatasetService(settings).import_data(
+        filename="network-results.csv",
+        raw="model,accuracy,recall\nSVM,85.2,72.1\nCNN-LSTM,93.7,89.8\n".encode("utf-8"),
+        name="真实网络异常检测实验结果",
+        task_id=TASK,
+    )
+    assert dataset["dataset_id"]
+    pipeline = FullPaperGenerationService(draft)
+    configure_pipeline_for_local_sources(pipeline, draft, literature, monkeypatch)
+
+    pipeline.start()
+    pipeline._prepare_global_research(None)
+    plan = pipeline.visualization_plan.get(TASK)
+    assert plan is not None
+    experiment = next(item for item in plan["items"] if item["purpose"] == "experimental_result")
+    assert experiment["target_section_id"] == "4-2-1"
+    assert experiment["dataset_ids"] == [dataset["dataset_id"]]
+
+    candidates = pipeline._candidates_for_plan_items([experiment], "4.2.1 与 Baseline 模型的性能对比")
+    candidate = pipeline._candidate_for_item(experiment, candidates, set())
+    assert candidate is not None and candidate["status"] == "ready"
+    accepted, _ = pipeline.visualization_plan.accept_candidate(TASK, experiment["id"], candidate, draft.load())
+    assert accepted is True
+    ready_summary = pipeline.visualization_plan.summary(TASK)
+    assert ready_summary is not None and ready_summary["ready_candidate_count"] == 1
+
+    result = pipeline.research.insert(candidate_id=candidate["id"], section_id="4-2-1")
+    block_id = pipeline._record_insert("4-2-1", result)
+    assert block_id
+    pipeline.visualization_plan.mark_inserted(TASK, experiment["id"], block_id)
+    inserted_summary = pipeline.visualization_plan.summary(TASK)
+    assert inserted_summary is not None
+    assert inserted_summary["ready_candidate_count"] == 0
+    assert inserted_summary["inserted_count"] == 1
+    blocks = next(section for section in draft.load()["sections"] if section["id"] == "4-2-1")["paragraphs"]
+    assert any(block.get("id") == block_id and block.get("type") == "chart" for block in blocks)
