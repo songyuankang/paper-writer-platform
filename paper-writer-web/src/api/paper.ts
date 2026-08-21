@@ -748,10 +748,18 @@ export interface PaperDraft {
     version: number;
     source: "ai" | "fallback";
     fallback_reason?: string | null;
+    fallback_kind?: "topic" | "generic" | null;
     research_type: string;
     required_elements: string[];
     coverage: Record<string, boolean>;
     entity_coverage: number;
+    entity_matches?: { entity: string; matched_terms: string[]; matched_sections: string[] }[];
+    score_breakdown?: Record<"structure" | "entity" | "research_type" | "method" | "experiment" | "logic", number>;
+    attempt_count?: number;
+    first_failure_reason?: string | null;
+    second_failure_reason?: string | null;
+    structured_output_used?: boolean;
+    normalization_applied?: "outline" | "chapters" | null;
     template_risk: "high" | "low";
     score: number;
     issues: string[];

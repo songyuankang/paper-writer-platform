@@ -160,7 +160,7 @@ export default function OutlineReviewPage() {
   if (loading && !draft) return <p className="py-12 text-center text-sm text-slate-500">{waitingLong ? "生成时间较长，仍在继续准备定制大纲…" : "正在准备定制大纲…"}</p>;
   if (!draft || !meta) return <div className="space-y-4 py-10 text-center"><p className="text-sm text-red-600">{error ?? "大纲草稿尚未就绪"}</p><button type="button" onClick={() => navigate("/create/references")} className="rounded-lg border border-neutral-300 px-4 py-2 text-sm">返回参考文献</button></div>;
 
-  const sourceText = meta.source === "ai" ? "AI 定制大纲" : "通用回退模板";
+  const sourceText = meta.source === "ai" ? "AI 定制大纲" : meta.fallback_kind === "topic" ? "题目化保底大纲" : "通用回退模板";
   return (
     <div className="space-y-5">
       <header>
@@ -169,8 +169,10 @@ export default function OutlineReviewPage() {
         <p className="mt-1 text-sm leading-6 text-slate-500">正文生成前，请检查目录是否覆盖研究对象、方法和验证路径。</p>
       </header>
       <section className={`rounded-2xl border p-4 ${riskStyle[meta.template_risk] ?? riskStyle.high}`}>
-        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">{sourceText}</p><p className="mt-1 text-xs">研究范式：{meta.research_type} · 质量评分：{meta.score}/100 · 题目实体覆盖：{Math.round(meta.entity_coverage * 100)}%</p></div><span className="rounded-full border border-current/20 px-2.5 py-1 text-xs">风险：{meta.template_risk === "high" ? "需核对" : "较低"}</span></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">{sourceText}</p><p className="mt-1 text-xs">研究范式：{meta.research_type} · 质量评分：{meta.score}/100 · 题目实体覆盖：{Math.round(meta.entity_coverage * 100)}%{meta.attempt_count ? ` · 生成尝试：${meta.attempt_count} 次` : ""}</p></div><span className="rounded-full border border-current/20 px-2.5 py-1 text-xs">风险：{meta.template_risk === "high" ? "需核对" : "较低"}</span></div>
         {meta.fallback_reason && <p className="mt-3 text-xs leading-5">回退原因：{meta.fallback_reason}</p>}
+        {meta.score_breakdown && <p className="mt-3 text-xs leading-5">评分明细：结构 {meta.score_breakdown.structure} · 实体 {meta.score_breakdown.entity} · 范式 {meta.score_breakdown.research_type} · 方法 {meta.score_breakdown.method} · 验证 {meta.score_breakdown.experiment} · 逻辑 {meta.score_breakdown.logic}</p>}
+        {meta.entity_matches && meta.entity_matches.length > 0 && <p className="mt-3 text-xs leading-5">实体命中：{meta.entity_matches.map((item) => `${item.entity}${item.matched_sections.length ? `（${item.matched_sections.join("、")}）` : "（未命中）"}`).join("；")}</p>}
         {meta.issues.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-xs leading-5">{meta.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}
         <p className="mt-3 text-xs">建议覆盖：{meta.required_elements.join("、")}</p>
       </section>

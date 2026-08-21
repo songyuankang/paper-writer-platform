@@ -169,7 +169,7 @@ def _post(base_url: str, api_key: str, payload: dict, timeout: int) -> dict:
 def chat_with(base_url: str, api_key: str, model: str,
               messages: list[dict], *, temperature: float = 0.7,
               max_tokens: int = 4000, timeout: int | None = None,
-              retries: int = 1) -> str:
+              retries: int = 1, response_format: dict | None = None) -> str:
     """通用 OpenAI 兼容非流式对话。对限流/超时/5xx 做一次重试。"""
     if not (api_key or "").strip():
         raise DeepSeekConfigError("未配置 DEEPSEEK_API_KEY")
@@ -184,6 +184,8 @@ def chat_with(base_url: str, api_key: str, model: str,
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     timeout = timeout or DEFAULT_TIMEOUT
     last_error: DeepSeekError | None = None
     for attempt in range(retries + 1):
@@ -202,16 +204,44 @@ def chat_with(base_url: str, api_key: str, model: str,
     raise DeepSeekServerError("DeepSeek 调用失败")
 
 
-def chat(messages: list[dict], *, max_tokens: int | None = None) -> str:
+def chat(messages: list[dict], *, max_tokens: int | None = None,
+         response_format: dict | None = None) -> str:
     """使用当前统一模型连接的非流式对话。
 
     :param max_tokens: 覆盖模型配置的 token 上限；不传时使用模型配置值。
+    :param response_format: 可选 OpenAI 兼容 JSON Schema 输出约束。
     """
     cfg = _current()
     return chat_with(
         cfg["base_url"], cfg["api_key"], cfg["model"], messages,
         temperature=cfg["temperature"],
-        max_tokens=max_tokens or cfg["max_tokens"])
+        max_tokens=max_tokens or cfg["max_tokens"],
+        response_format=response_format)
+
+
+def _response_format_unsupported(exc: DeepSeekModelError) -> bool:
+    """仅识别模型明确拒绝结构化输出的情形，避免吞掉其他 400 错误。"""
+    message = str(exc).lower()
+    markers = (
+        "response_format", "json_schema", "json schema", "structured output",
+        "unsupported", "not support", "不支持", "未知参数", "invalid parameter",
+    )
+    return any(marker in message for marker in markers)
+
+
+def chat_json(messages: list[dict], *, response_format: dict,
+              max_tokens: int | None = None) -> tuple[str, bool]:
+    """请求结构化 JSON；提供商明确不支持时透明退回普通模式。
+
+    返回 ``(content, structured_output_used)``。只有 response_format 被模型明确
+    拒绝时才降级，鉴权、限流、超时和其他参数错误仍照常抛出。
+    """
+    try:
+        return chat(messages, max_tokens=max_tokens, response_format=response_format), True
+    except DeepSeekModelError as exc:
+        if not _response_format_unsupported(exc):
+            raise
+        return chat(messages, max_tokens=max_tokens), False
 
 
 def chat_stream_with(base_url: str, api_key: str, model: str,

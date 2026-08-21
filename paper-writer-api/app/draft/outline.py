@@ -15,7 +15,8 @@ from app.services.outline_service import (
     OUTLINES,
     SUB_TEMPLATES,
 )
-from app.draft.outline_quality import evaluate_outline
+from app.draft.outline_entities import topic_fallback_titles
+from app.draft.outline_quality import classify_research, evaluate_outline
 
 #: fallback 子章节补充：SUB_TEMPLATES 以精确 key 匹配，"文献综述与理论基础"
 #: 无法命中 "文献综述"，这里补全毕业论文第二章的子章节模板。
@@ -45,6 +46,55 @@ logger = logging.getLogger(__name__)
 #: 大纲生成使用的 token 上限（三级大纲 + 每叶 gist 的 JSON 较长，
 #: 4000 容易被截断导致解析失败，调整到 8000）。
 OUTLINE_MAX_TOKENS = 8000
+
+REPAIR_PROMPT = """上一轮输出未包含必需的 sections 字段或不符合指定章节结构。
+请严格按照指定 JSON Schema 返回。顶层必须包含 sections；不要返回 outline 或 chapters；
+不要输出解释文字；只返回合法 JSON。"""
+
+
+def _section_node_schema(level: int) -> dict:
+    """构造严格且最多三级的章节节点 Schema。"""
+    properties: dict[str, object] = {
+        "section_id": {"type": "string"},
+        "title": {"type": "string", "minLength": 1},
+        "level": {"type": "integer", "const": level},
+        "purpose": {"type": "string"},
+        "key_points": {"type": "array", "items": {"type": "string"}},
+        "gist": {"type": "string"},
+        "children": {"type": "array"},
+    }
+    if level < 3:
+        properties["children"] = {
+            "type": "array", "items": _section_node_schema(level + 1),
+        }
+    else:
+        properties["children"] = {"type": "array", "maxItems": 0}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["title", "level", "children"],
+        "properties": properties,
+    }
+
+
+OUTLINE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "draft_outline_sections",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["sections"],
+            "properties": {
+                "sections": {
+                    "type": "array", "minItems": 1,
+                    "items": _section_node_schema(1),
+                },
+            },
+        },
+    },
+}
 
 CN_NUM = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
 
@@ -95,6 +145,73 @@ def _extract_json(text: str) -> tuple[dict | None, str | None]:
     return None, f"JSON 解析失败: {last_error or '未找到 JSON 对象'}"
 
 
+def normalize_outline_payload(data: dict) -> tuple[dict | None, str | None, str | None]:
+    """归一化明确章节数组别名并严格校验最多三级 sections 树。
+
+    只接受 ``sections``、``outline`` 或 ``chapters`` 的对象数组；字符串大纲
+    和缺失标题等情形绝不猜测或调用模型补全。返回 ``(payload, alias, error)``。
+    """
+    alias = next((key for key in ("sections", "outline", "chapters") if key in data), None)
+    if alias is None:
+        return None, None, "JSON 中缺少 sections 字段"
+    raw_sections = data.get(alias)
+    if not isinstance(raw_sections, list) or not raw_sections:
+        return None, alias, f"{alias} 必须为非空章节对象数组"
+
+    def normalize_node(node: object, expected_level: int) -> tuple[dict | None, str | None]:
+        if not isinstance(node, dict):
+            return None, "章节节点必须是 object"
+        title = node.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return None, "章节节点缺少非空 title"
+        level = node.get("level")
+        if not isinstance(level, int) or isinstance(level, bool) or level < 1 or level > 3:
+            return None, "章节节点 level 必须为 1~3 整数"
+        if level != expected_level:
+            return None, f"章节层级不连续：期望 level={expected_level}，实际为 {level}"
+        raw_children = node.get("children")
+        if raw_children is None:
+            # 只有第三层，或带有明确叶子写作说明的节点，才可安全补空 children。
+            if level == 3 or any(key in node for key in ("gist", "purpose", "key_points")):
+                raw_children = []
+            else:
+                return None, "非叶子章节缺少 children 数组"
+        if not isinstance(raw_children, list):
+            return None, "章节节点 children 必须为数组"
+        if level == 3 and raw_children:
+            return None, "章节层级最多三级"
+        normalized: dict[str, object] = {
+            "title": title.strip(), "level": level, "children": [],
+        }
+        for key in ("section_id", "purpose", "gist"):
+            value = node.get(key)
+            if value is not None:
+                if not isinstance(value, str):
+                    return None, f"章节节点 {key} 必须为字符串"
+                normalized[key] = value.strip()
+        key_points = node.get("key_points")
+        if key_points is not None:
+            if not isinstance(key_points, list) or not all(isinstance(item, str) for item in key_points):
+                return None, "章节节点 key_points 必须为字符串数组"
+            normalized["key_points"] = [item.strip() for item in key_points if item.strip()]
+        for child in raw_children:
+            if level >= 3:
+                return None, "章节层级最多三级"
+            normalized_child, child_error = normalize_node(child, level + 1)
+            if child_error:
+                return None, child_error
+            normalized["children"].append(normalized_child)
+        return normalized, None
+
+    sections: list[dict] = []
+    for section in raw_sections:
+        normalized, error = normalize_node(section, 1)
+        if error:
+            return None, alias, error
+        sections.append(normalized)
+    return {"sections": sections}, alias, None
+
+
 def _flatten(node: dict, parent: str, idx: int, out: list[dict]) -> None:
     """把嵌套 sections 展开成扁平列表（id/number/level/title/gist/paragraphs）。"""
     level = int(node.get("level") or 1)
@@ -122,10 +239,11 @@ def _flatten(node: dict, parent: str, idx: int, out: list[dict]) -> None:
         _flatten(ch, sid, i, out)
 
 
-def _ai_outline(paper_info: dict) -> tuple[list[dict] | None, str | None]:
-    """调用 AI 生成三级大纲，返回 ``(flat, error)``。
+def _ai_outline(paper_info: dict, *, repair: bool = False) -> tuple[list[dict] | None, dict, str | None]:
+    """调用 AI 生成三级大纲并以唯一 ``sections`` 契约返回。
 
-    ``error`` 非 None 表示生成/解析失败（原因字符串），此时 ``flat`` 为 None。
+    返回 ``(flat, diagnostics, error)``。支持 provider 的 JSON Schema 输出优先使用；
+    provider 明确拒绝该参数时，调用层安全降级到 Prompt + 同一严格解析契约。
     """
     references = paper_info.get("references") or []
     ref_text = "\n".join(f"[{index + 1}] {item}" for index, item in enumerate(references[:20])) or "（未选择参考文献）"
@@ -139,30 +257,45 @@ def _ai_outline(paper_info: dict) -> tuple[list[dict] | None, str | None]:
         keywords="、".join(paper_info.get("keywords") or []) or "（由大纲生成）",
         references=ref_text,
     )
-    content = deepseek.chat(
-        [{"role": "system", "content": deepseek_service.system_prompt()},
-         {"role": "user", "content": user}],
-        max_tokens=OUTLINE_MAX_TOKENS)
+    messages = [
+        {"role": "system", "content": deepseek_service.system_prompt()},
+        {"role": "user", "content": user},
+    ]
+    if repair:
+        messages.append({"role": "user", "content": REPAIR_PROMPT})
+    content, structured_output_used = deepseek.chat_json(
+        messages, response_format=OUTLINE_RESPONSE_FORMAT, max_tokens=OUTLINE_MAX_TOKENS,
+    )
+    diagnostics = {
+        "structured_output_used": structured_output_used,
+        "normalization_applied": None,
+    }
     data, err = _extract_json(content)
     if err:
-        return None, err
-    if not data.get("sections"):
-        return None, "JSON 中缺少 sections 字段"
+        return None, diagnostics, err
+    normalized, alias, err = normalize_outline_payload(data)
+    diagnostics["normalization_applied"] = alias if alias and alias != "sections" else None
+    if err:
+        return None, diagnostics, err
     flat: list[dict] = []
-    for i, ch in enumerate(data["sections"]):
+    for i, ch in enumerate(normalized["sections"]):
         _flatten(ch, "", i, flat)
     if not flat:
-        return None, "sections 展开后为空"
-    return flat, None
+        return None, diagnostics, "sections 展开后为空"
+    return flat, diagnostics, None
 
 
-def _fallback_outline(paper_info: dict) -> list[dict]:
-    """无模型时的确定性大纲：内置章模板 + 小节模板，gist 用章节 focus。"""
+def _fallback_outline(paper_info: dict) -> tuple[list[dict], str]:
+    """生成确定性的题目化保底目录；无实体时才降至旧通用模板。"""
     paper_type = paper_info.get("paper_type", "课程论文")
-    titles = OUTLINES.get(paper_type, OUTLINES["课程论文"])
+    custom_titles = topic_fallback_titles(
+        str(paper_info.get("title") or ""), classify_research(paper_info),
+    )
+    fallback_kind = "topic" if custom_titles else "generic"
+    titles = custom_titles or OUTLINES.get(paper_type, OUTLINES["课程论文"])
     flat: list[dict] = []
-    for i, t in enumerate(titles):
-        name = t.split(" ", 1)[-1] if " " in t else t
+    for i, title in enumerate(titles):
+        name = title.split(" ", 1)[-1] if " " in title and title[:1].isdigit() else title
         sid = str(i + 1)
         number = f"第{CN_NUM[i + 1] if i + 1 < len(CN_NUM) else i + 1}章"
         flat.append({"id": sid, "number": number, "title": name,
@@ -172,30 +305,60 @@ def _fallback_outline(paper_info: dict) -> list[dict]:
             flat.append({"id": f"{sid}-{j + 1}", "number": f"{i + 1}.{j + 1}",
                          "title": sub, "level": 2, "gist": f"围绕“{sub}”展开论述",
                          "paragraphs": [], "children": []})
-    return flat
+    return flat, fallback_kind
 
 
 def build_outline_with_meta(paper_info: dict, version: int = 1) -> tuple[list[dict], dict]:
-    """构建大纲并记录来源、回退原因与可解释质量诊断。"""
+    """构建大纲并记录来源、失败重试及可解释质量诊断。"""
     fallback_reason: str | None = None
+    attempt_count = 0
+    first_failure_reason: str | None = None
+    second_failure_reason: str | None = None
+    structured_output_used = False
+    normalization_applied: str | None = None
     if deepseek.is_enabled():
-        try:
-            flat, err = _ai_outline(paper_info)
-        except Exception as exc:  # noqa: BLE001 - 调用/网络异常统一走回退
-            logger.warning("AI 大纲生成异常，进入 fallback：原因=%s", exc)
-            flat, err = None, str(exc)
-        if flat is not None:
-            logger.info("AI 大纲生成成功：章节数量=%d", len(flat))
-            return flat, evaluate_outline(paper_info, flat, source="ai", version=version)
-        fallback_reason = err or "模型输出无法解析为合格的 JSON 大纲"
-        logger.warning("AI 大纲解析失败，进入 fallback：原因=%s", fallback_reason)
+        for attempt in range(2):
+            attempt_count = attempt + 1
+            try:
+                flat, diagnostics, err = _ai_outline(paper_info, repair=attempt == 1)
+                structured_output_used = structured_output_used or bool(diagnostics.get("structured_output_used"))
+                normalization_applied = normalization_applied or diagnostics.get("normalization_applied")
+            except Exception as exc:  # noqa: BLE001 - 调用/网络异常统一走受控 fallback
+                logger.warning("AI 大纲第 %d 次生成异常：%s", attempt_count, exc)
+                flat, err = None, str(exc)
+            if flat is not None:
+                logger.info("AI 大纲生成成功：章节数量=%d，尝试次数=%d", len(flat), attempt_count)
+                meta = evaluate_outline(paper_info, flat, source="ai", version=version)
+                meta.update({
+                    "attempt_count": attempt_count,
+                    "first_failure_reason": first_failure_reason,
+                    "second_failure_reason": second_failure_reason,
+                    "structured_output_used": structured_output_used,
+                    "normalization_applied": normalization_applied,
+                })
+                return flat, meta
+            if attempt == 0:
+                first_failure_reason = err or "模型输出无法解析为合格的 JSON 大纲"
+            else:
+                second_failure_reason = err or "模型输出无法解析为合格的 JSON 大纲"
+        fallback_reason = second_failure_reason or first_failure_reason or "模型输出无法解析为合格的 JSON 大纲"
+        logger.warning("AI 大纲两次生成均失败，进入 fallback：原因=%s", fallback_reason)
     else:
-        fallback_reason = "未配置可用模型，使用内置模板大纲"
+        fallback_reason = "未配置可用模型，使用题目化保底大纲"
         logger.info(fallback_reason)
-    flat = _fallback_outline(paper_info)
-    return flat, evaluate_outline(
-        paper_info, flat, source="fallback", fallback_reason=fallback_reason, version=version,
+    flat, fallback_kind = _fallback_outline(paper_info)
+    meta = evaluate_outline(
+        paper_info, flat, source="fallback", fallback_reason=fallback_reason,
+        fallback_kind=fallback_kind, version=version,
     )
+    meta.update({
+        "attempt_count": attempt_count,
+        "first_failure_reason": first_failure_reason,
+        "second_failure_reason": second_failure_reason,
+        "structured_output_used": structured_output_used,
+        "normalization_applied": normalization_applied,
+    })
+    return flat, meta
 
 
 def build_outline(paper_info: dict) -> list[dict]:
