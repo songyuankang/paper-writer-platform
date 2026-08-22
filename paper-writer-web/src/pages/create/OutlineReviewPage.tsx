@@ -160,7 +160,10 @@ export default function OutlineReviewPage() {
   if (loading && !draft) return <p className="py-12 text-center text-sm text-slate-500">{waitingLong ? "生成时间较长，仍在继续准备定制大纲…" : "正在准备定制大纲…"}</p>;
   if (!draft || !meta) return <div className="space-y-4 py-10 text-center"><p className="text-sm text-red-600">{error ?? "大纲草稿尚未就绪"}</p><button type="button" onClick={() => navigate("/create/references")} className="rounded-lg border border-neutral-300 px-4 py-2 text-sm">返回参考文献</button></div>;
 
-  const sourceText = meta.source === "ai" ? "AI 定制大纲" : "通用回退模板";
+  const sourceText = meta.source === "ai" ? "AI 定制大纲" : "通用模板预览";
+  const generationReady = meta.is_generation_ready === true;
+  const paradigmText = meta.research_paradigm || meta.research_type;
+  const qualityText = meta.outline_quality === "pass" ? "通过" : "未通过";
   return (
     <div className="space-y-5">
       <header>
@@ -168,9 +171,11 @@ export default function OutlineReviewPage() {
         <h2 className="mt-1 text-xl font-bold text-slate-900">确认论文大纲</h2>
         <p className="mt-1 text-sm leading-6 text-slate-500">正文生成前，请检查目录是否覆盖研究对象、方法和验证路径。</p>
       </header>
-      <section className={`rounded-2xl border p-4 ${riskStyle[meta.template_risk] ?? riskStyle.high}`}>
-        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">{sourceText}</p><p className="mt-1 text-xs">研究范式：{meta.research_type} · 质量评分：{meta.score}/100 · 题目实体覆盖：{Math.round(meta.entity_coverage * 100)}%</p></div><span className="rounded-full border border-current/20 px-2.5 py-1 text-xs">风险：{meta.template_risk === "high" ? "需核对" : "较低"}</span></div>
-        {meta.fallback_reason && <p className="mt-3 text-xs leading-5">回退原因：{meta.fallback_reason}</p>}
+      <section className={`rounded-2xl border p-4 ${generationReady ? riskStyle.low : riskStyle.high}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-semibold">{sourceText}</p><p className="mt-1 text-xs">研究范式：{paradigmText} · 题目实体覆盖：{Math.round(meta.entity_coverage * 100)}% · 大纲质量：{qualityText}</p></div><span className="rounded-full border border-current/20 px-2.5 py-1 text-xs">{generationReady ? "可开始全文生成" : "不可开始全文生成"}</span></div>
+        {!generationReady && <p className="mt-3 rounded-lg border border-current/20 bg-white/45 px-3 py-2 text-xs font-medium leading-5">AI 大纲生成失败或未通过质量门禁。当前仅显示通用模板预览，请重新生成定制大纲后再开始全文生成。</p>}
+        {meta.fallback_reason && <p className="mt-3 text-xs leading-5">生成诊断：{meta.fallback_reason}</p>}
+        {(meta.block_reasons ?? []).length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-xs leading-5">{meta.block_reasons?.map((reason) => <li key={reason}>{reason}</li>)}</ul>}
         {meta.issues.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-xs leading-5">{meta.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}
         <p className="mt-3 text-xs">建议覆盖：{meta.required_elements.join("、")}</p>
       </section>
@@ -184,7 +189,7 @@ export default function OutlineReviewPage() {
         })}</div>
         <div className="mt-4 grid gap-2 rounded-xl border border-dashed border-slate-300 bg-white p-3 sm:grid-cols-[1fr_180px_auto]"><input value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder="新增章节标题" className="rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-black" /><select value={parentId} onChange={(event) => setParentId(event.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm"><option value="">新增一级章节</option>{roots.map((root) => <option key={root.id} value={root.id}>作为「{root.title}」的小节</option>)}</select><button type="button" onClick={() => void addSection()} disabled={!newTitle.trim()} className="rounded-lg border border-neutral-300 px-3 py-2 text-sm font-medium hover:border-black disabled:opacity-50">新增</button></div>
       </section>
-      <footer className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:items-center sm:justify-between"><button type="button" onClick={() => navigate("/create/references")} className="rounded-xl border border-neutral-300 px-4 py-2.5 text-sm text-neutral-700">返回参考文献</button><button type="button" onClick={() => void confirm()} disabled={working !== null} className="rounded-xl bg-black px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-neutral-700 disabled:opacity-50">{working === "confirm" ? "确认中…" : "确认大纲并进入正文"}</button></footer>
+      <footer className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-5 sm:flex-row sm:items-center sm:justify-between"><button type="button" onClick={() => navigate("/create/references")} className="rounded-xl border border-neutral-300 px-4 py-2.5 text-sm text-neutral-700">返回参考文献</button><button type="button" onClick={() => void confirm()} disabled={working !== null || !generationReady} title={generationReady ? undefined : "请先重新生成通过质量门禁的 AI 定制大纲"} className="rounded-xl bg-black px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50">{working === "confirm" ? "确认中…" : generationReady ? "确认大纲并进入正文" : "请重新生成定制大纲"}</button></footer>
     </div>
   );
 }

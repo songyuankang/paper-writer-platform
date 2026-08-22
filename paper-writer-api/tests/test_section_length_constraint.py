@@ -19,6 +19,13 @@ def test_section_generation_prompt_includes_leaf_target_and_minimum() -> None:
         service = DraftService("length-test", Path(temp_dir) / "length-test")
         with mock.patch("app.draft.service.deepseek.is_enabled", return_value=False):
             draft = service.build(paper_info)
+        # 本测试只验证 section prompt 的长度预算；显式提供已审核 AI 大纲状态，
+        # 不再依赖被产品安全门禁禁止的 fallback → 正文生成路径。
+        draft["outline_meta"] = {
+            "source": "ai", "is_generation_ready": True, "outline_quality": "pass",
+            "block_reasons": [], "confirmation_required": False, "confirmed": True,
+        }
+        service.save(draft)
         section = next(
             item for item in draft["sections"]
             if item.get("target_chars") and item.get("gist")

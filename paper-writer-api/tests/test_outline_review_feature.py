@@ -41,13 +41,16 @@ def test_outline_review_metadata_confirmation_and_structure_edit(tmp_path):
     assert meta["confirmation_required"] is True
     assert meta["confirmed"] is False
 
-    with pytest.raises(ValueError, match="确认目录"):
+    assert meta["is_generation_ready"] is False
+    assert meta["outline_quality"] == "blocked"
+    with pytest.raises(ValueError, match="质量未通过"):
         service.ensure_outline_confirmed()
+    with pytest.raises(ValueError, match="不能确认"):
+        service.confirm_outline()
+    with pytest.raises(ValueError, match="质量未通过"):
+        service.oneclick()
 
-    confirmed = service.confirm_outline()
-    assert confirmed["confirmed"] is True
-    service.ensure_outline_confirmed()
-
+    # 回退结构仍然只是可编辑预览，供用户检查和重新生成前参考。
     added = service.add_outline_section("部署约束与工程实现")
     updated = service.load()
     assert any(section["title"] == "部署约束与工程实现" for section in updated["sections"])

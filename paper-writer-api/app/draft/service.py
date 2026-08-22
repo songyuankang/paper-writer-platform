@@ -332,7 +332,17 @@ class DraftService:
         draft = self.load()
         return dict(draft.get("outline_meta") or {})
 
+    def ensure_outline_generation_ready(self) -> None:
+        """Reject fallback or failed-quality outlines before any body generation path."""
+        meta = self.outline_meta()
+        if meta.get("is_generation_ready") is True:
+            return
+        reasons = [str(reason) for reason in (meta.get("block_reasons") or []) if str(reason).strip()]
+        detail = reasons[0] if reasons else "AI 大纲尚未通过质量门禁。"
+        raise ValueError(f"大纲质量未通过，无法开始全文生成：{detail} 请重新生成定制大纲后再试。")
+
     def ensure_outline_confirmed(self) -> None:
+        self.ensure_outline_generation_ready()
         meta = self.outline_meta()
         if meta.get("confirmation_required") and not meta.get("confirmed"):
             raise ValueError("请先在大纲确认页核对并确认目录后，再生成正文。")
@@ -341,6 +351,10 @@ class DraftService:
         with self.lock:
             draft = self.load()
             meta = dict(draft.get("outline_meta") or {})
+            if meta.get("is_generation_ready") is not True:
+                reasons = [str(reason) for reason in (meta.get("block_reasons") or []) if str(reason).strip()]
+                detail = reasons[0] if reasons else "AI 大纲尚未通过质量门禁。"
+                raise ValueError(f"大纲质量未通过，不能确认：{detail} 请重新生成定制大纲。")
             meta["confirmation_required"] = True
             meta["confirmed"] = True
             from datetime import datetime, timezone
@@ -726,7 +740,8 @@ class DraftService:
 
     def oneclick(self, model_id: str | None = None,
                  progress_cb=None) -> dict:
-        """一键全文：生成正文、补足字数，并补齐缺失的英文摘要与致谢。"""
+        """一键全文：仅允许已通过质量门禁且已确认的 AI 大纲进入生成。"""
+        self.ensure_outline_confirmed()
         with self.lock:
             draft = self.load()
             target_chars = max(int((draft.get("meta") or {}).get("word_count", 3000)), 500)
@@ -833,6 +848,7 @@ class DraftService:
 
     def oneclick_stream(self, model_id: str | None = None) -> Iterator[dict]:
         """按小节串行生成，并实时产出 AI 文本片段。"""
+        self.ensure_outline_confirmed()
         with self.lock:
             draft = self.load()
             draft.update(generating=True, progress=0, done=0,

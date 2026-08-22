@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.draft import outline as outline_mod  # noqa: E402
 from app.draft.service import (  # noqa: E402
     DraftService,
     _clean_generated_paragraphs,
@@ -49,11 +50,13 @@ def _make_service(tmp: Path, task_id: str = "drafttest") -> DraftService:
 
 
 def _build(service: DraftService) -> None:
-    """构建草稿：确定性 fallback 大纲（不依赖真实 AI/DB）。"""
-    with mock.patch.object(DraftService, "_model_ctx",
-                           return_value=nullcontext()), \
-         mock.patch("app.draft.service.deepseek.is_enabled",
-                    return_value=False):
+    """构建已通过质量门禁的确定性 AI 大纲，不依赖真实 AI/DB。"""
+    sections = outline_mod._fallback_outline(PAPER_INFO)
+    meta = {
+        "source": "ai", "is_generation_ready": True, "outline_quality": "pass",
+        "block_reasons": [], "confirmation_required": False, "confirmed": True,
+    }
+    with mock.patch("app.draft.service.outline_mod.build_outline_with_meta", return_value=(sections, meta)):
         service.build(PAPER_INFO)
 
 
@@ -300,6 +303,10 @@ class TestOneclickCompleteness(unittest.TestCase):
             "abstract": {"zh": "中文摘要", "en": abstract_en},
             "keywords": {"zh": ["测试"], "en": []},
             "acknowledgement": acknowledgement,
+            "outline_meta": {
+                "source": "ai", "is_generation_ready": True, "outline_quality": "pass",
+                "block_reasons": [], "confirmation_required": False, "confirmed": True,
+            },
             "sections": [{
                 "id": "1", "number": "1.1", "title": "测试小节", "level": 2,
                 "gist": "测试主旨", "children": [], "target_chars": 500,

@@ -2,6 +2,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
+from unittest import mock
 
 from app.config import Settings
 from app.draft.service import DraftService
@@ -101,7 +102,9 @@ def test_user_note_source_level_is_disclosed(tmp_path):
 
 
 def test_model_unavailable_uses_rule_fallback(tmp_path):
-    _,draft,_,_=generate(tmp_path,"hypothesis_discussion",model_id=None)
+    # Test semantics must not depend on a developer machine's configured default model.
+    with mock.patch("app.services.discussion_writer_service.resolve_model", return_value=None):
+        _,draft,_,_=generate(tmp_path,"hypothesis_discussion",model_id=None)
     assert draft["provider"]=="rule_based_fallback" and draft["sections"]["hypothesis_discussion"]["paragraphs"]
 
 

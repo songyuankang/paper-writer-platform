@@ -199,6 +199,11 @@ export default function BodyEditorUniPaper({
   }
 
   async function handleOneclick() {
+    const meta = draft?.outline_meta;
+    if (meta?.is_generation_ready !== true) {
+      setError(meta?.block_reasons?.[0] ?? "AI 大纲尚未通过质量门禁，请重新生成定制大纲后再开始全文生成。");
+      return;
+    }
     setError(null);
     setOneclickStarting(true);
     try {
@@ -407,6 +412,9 @@ export default function BodyEditorUniPaper({
   const minimum = draft.word_stats?.minimum ?? Math.round(target * 0.95);
   const shortfall = draft.word_stats?.shortfall ?? Math.max(0, target - totalWords);
   const wordStatus = draft.word_status ?? (totalWords >= minimum ? "completed" : "shortfall");
+  const outlineGenerationReady = draft.outline_meta?.is_generation_ready === true;
+  const outlineBlockedReason = draft.outline_meta?.block_reasons?.[0]
+    ?? "AI 大纲尚未通过质量门禁，请返回大纲复核页重新生成定制大纲。";
   const pct = target > 0 ? Math.min(100, Math.round((totalWords / target) * 100)) : 0;
   const sections = draft.sections;
   const roots = sections.filter((s) => s.level === 1);
@@ -493,10 +501,11 @@ export default function BodyEditorUniPaper({
         <button
           type="button"
           onClick={() => setOneclickConfirmOpen(true)}
-          disabled={draft.generating || oneclickStarting}
+          disabled={draft.generating || oneclickStarting || !outlineGenerationReady}
+          title={outlineGenerationReady ? undefined : outlineBlockedReason}
           className={BTN_BLACK}
         >
-          {oneclickStarting ? "启动中…" : draft.generating ? "生成中…" : "一键全文"}
+          {oneclickStarting ? "启动中…" : draft.generating ? "生成中…" : outlineGenerationReady ? "一键全文" : "大纲未通过"}
         </button>
         <button
           type="button"
@@ -512,6 +521,12 @@ export default function BodyEditorUniPaper({
         <div className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-800">
           <span className="font-semibold">正文尚未达标</span>
           <span>当前 {totalWords}/{target} 字，仍差 {shortfall} 字；系统已完成最多两轮定向补写。可补充或编辑正文后再次执行一键全文。</span>
+        </div>
+      )}
+      {!outlineGenerationReady && (
+        <div className="border-b border-amber-200 bg-amber-50 px-6 py-2 text-sm text-amber-900">
+          <span className="font-semibold">全文生成已阻断。</span> {outlineBlockedReason}
+          <span className="ml-2">请返回大纲复核页重新生成通过门禁的 AI 定制大纲。</span>
         </div>
       )}
       {error && (
