@@ -21,6 +21,7 @@ from app.config import Settings, settings
 
 from app.draft import outline as outline_mod
 from app.draft.chart_runtime import now, recompute_chart_block, walk_sections
+from app.draft.generation_quality import GeneratedBodyQualityError, assert_generated_body
 from app.services.research_object_service import renumber_document_references
 from app.services.cross_reference_service import CrossReferenceService
 from app.services.dependency_graph_service import DependencyGraphService
@@ -532,10 +533,11 @@ class DraftService:
         return None
 
     def generate_section(self, section_id: str, model_id: str | None = None) -> dict:
-        """按小节标题+主旨生成一个或多个段落，追加到该小节。
+        """生成一个章节，并在文本进入 ``draft.json`` 前执行阻断式质量校验。
 
-        AI 返回文本经 ``_clean_generated_paragraphs`` 清洗后按自然段写入
-        ``paragraphs``：首段写入本次生成的段落，其余自然段追加为小节新段落。
+        首次命中 Markdown、调试残片、重复标题、重复短语或异常长度时，仅执行
+        一次受控重试。第二次仍不合格时不写入任何正文 Block，而是在 section
+        上记录 ``generation_status=quality_blocked``，由全文流水线继续处理其余章节。
         """
         with self.lock:
             draft = self.load()
@@ -544,7 +546,6 @@ class DraftService:
             if not (section.get("gist") or "").strip():
                 raise ValueError(f"小节「{section['title']}」没有段落主旨，请先填写主旨")
             paper = self._paper_info(draft)
-            # 旧草稿没有预算字段时按当前目标补齐，确保重新生成也受长度约束。
             if not section.get("target_chars"):
                 _apply_leaf_budgets(draft["sections"], int(paper["word_count"]))
                 section = self._find_section(draft, section_id)
@@ -564,39 +565,83 @@ class DraftService:
                 target_chars=target_chars,
                 min_chars=min_chars,
             )
-            para = {"id": self._next_paragraph_id(section), "text": ""}
-            section["paragraphs"].append(para)
-            self.save(draft)
+            section_title = str(section["title"])
 
         ctx = self._model_ctx(model_id)
-        try:
-            if ctx:
-                with ctx:
-                    text = deepseek.chat(
-                        [{"role": "system",
-                          "content": deepseek_service.system_prompt()},
-                         {"role": "user", "content": user}])
-            else:
-                text = f"（未配置 AI 模型）{section['title']}：请配置模型后生成。"
-            if not text.strip():
-                text = (f"（生成结果为空）{section['title']}："
-                        "请检查模型配置后重新生成。")
-            segments = _clean_generated_paragraphs(text)
-            if not segments:
-                raise deepseek.DeepSeekModelError("模型未返回可用正文，请重新生成。")
-        except deepseek.DeepSeekError as exc:
-            segments = [f"（生成失败：{exc}）"]
+        quality_issues: list[dict] = []
+        model_error = ""
+        segments: list[str] = []
+        attempts = 0
+        for attempt in (1, 2):
+            attempts = attempt
+            messages = [
+                {"role": "system", "content": deepseek_service.system_prompt()},
+                {"role": "user", "content": user},
+            ]
+            if attempt == 2:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "上一轮正文未通过入库质量检查。请只输出当前小节的正式学术正文："
+                        "不得输出 Markdown 标题、代码围栏、debug/reasoning/analysis、JSON、"
+                        "解释文字或任何重复标题；不得复述句子。只返回 2—5 个自然段。"
+                    ),
+                })
+            try:
+                if ctx:
+                    with ctx:
+                        text = deepseek.chat(messages)
+                else:
+                    text = f"（未配置 AI 模型）{section_title}：请配置模型后生成。"
+                assert_generated_body(text, target_chars=target_chars)
+                segments = _clean_generated_paragraphs(text)
+                if not segments:
+                    raise GeneratedBodyQualityError([{
+                        "code": "empty_cleaned_body", "message": "清洗后未保留可用正文。"
+                    }])
+                quality_issues = []
+                break
+            except GeneratedBodyQualityError as exc:
+                quality_issues = list(exc.issues)
+                continue
+            except deepseek.DeepSeekError as exc:
+                model_error = str(exc)
+                quality_issues = [{"code": "model_error", "message": f"模型调用失败：{exc}"}]
+                break
+
+        if not segments:
+            with self.lock:
+                draft = self.load()
+                blocked = self._find_section(draft, section_id)
+                blocked["generation_status"] = "quality_blocked"
+                blocked["generation_attempt_count"] = attempts
+                blocked["generation_quality_issues"] = quality_issues
+                if model_error:
+                    blocked["generation_error"] = model_error
+                self.save(draft)
+            return {
+                "id": "", "type": "generation_failed", "status": "quality_blocked",
+                "section_id": section_id, "attempt_count": attempts,
+                "quality_issues": quality_issues,
+            }
+
         with self.lock:
             draft = self.load()
-            for s in draft["sections"]:
-                if s["id"] == section_id:
-                    for p in s["paragraphs"]:
-                        if p["id"] == para["id"]:
-                            p["text"] = segments[0]
-                            break
-                    for seg in segments[1:]:
-                        s["paragraphs"].append(
-                            {"id": self._next_paragraph_id(s), "text": seg})
+            target = self._find_section(draft, section_id)
+            para = {
+                "id": self._next_paragraph_id(target), "text": segments[0],
+                "generation_quality": {"attempt_count": attempts, "status": "passed"},
+            }
+            target.setdefault("paragraphs", []).append(para)
+            for seg in segments[1:]:
+                target["paragraphs"].append({
+                    "id": self._next_paragraph_id(target), "text": seg,
+                    "generation_quality": {"attempt_count": attempts, "status": "passed"},
+                })
+            target["generation_status"] = "generated"
+            target["generation_attempt_count"] = attempts
+            target.pop("generation_quality_issues", None)
+            target.pop("generation_error", None)
             self.save(draft)
         return para
 

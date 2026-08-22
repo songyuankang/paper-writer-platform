@@ -44,7 +44,21 @@ def fake_generate(service: DraftService):
         with service.lock:
             draft = service.load()
             section = next(item for item in draft["sections"] if item["id"] == section_id)
-            block = {"id": f"p-{section_id}-{len(section['paragraphs']) + 1}", "text": "本节围绕研究对象、理论基础与应用场景展开系统论述。" * 12}
+            body = "".join([
+                "问题界定明确了研究对象及其现实边界。",
+                "理论基础阐释了关键概念之间的逻辑关系。",
+                "方法说明交代了分析路径与识别思路。",
+                "资料来源限定了证据的适用范围。",
+                "变量设计区分了核心指标与控制因素。",
+                "比较分析呈现了不同条件下的差异。",
+                "结果讨论解释了主要发现的经济含义。",
+                "稳健检验考察了替代设定下的结论。",
+                "机制部分说明了影响发生的传导渠道。",
+                "异质性视角识别了群体间的不同表现。",
+                "局限说明保留了证据不足与待验证之处。",
+                "小结归纳了本节论证与后文的衔接关系。",
+            ])
+            block = {"id": f"p-{section_id}-{len(section['paragraphs']) + 1}", "text": body}
             section["paragraphs"].append(block)
             service.save(draft)
             return block
@@ -300,3 +314,33 @@ def test_resume_rebuilds_legacy_provisional_plan_after_research_is_ready(tmp_pat
     assert rebuilt is not None and rebuilt["finalized"] is True
     assert len(rebuilt["items"]) == 3
     assert completed["full_paper_pipeline"]["visualization_plan"]["total_items"] == 3
+
+
+def test_full_pipeline_records_quality_blocked_section_without_visualization_insert(tmp_path: Path, monkeypatch):
+    settings = settings_for(tmp_path)
+    draft = paper(settings)
+    pipeline = FullPaperGenerationService(draft)
+    blocked = {"id": "", "status": "quality_blocked", "attempt_count": 2, "quality_issues": [{"code": "repeated_heading"}]}
+    monkeypatch.setattr(draft, "generate_section", lambda *_args, **_kwargs: blocked)
+
+    pipeline.start()
+    section = draft.load()["sections"][0]
+    assert pipeline._generate_one_section(section, 1, 2, None, allow_research=True) is True
+    current = draft.load()
+    state = current["full_paper_pipeline"]
+    assert state["quality_blocked_sections"][0]["section_id"] == "1-1"
+    assert "1-1" not in state["completed_section_ids"]
+    assert not current["sections"][0]["paragraphs"]
+
+    with draft.lock:
+        current = draft.load()
+        current["full_paper_pipeline"].update(status="running", quality_blocked_sections=state["quality_blocked_sections"])
+        draft.save(current)
+    monkeypatch.setattr(pipeline, "_prepare_global_research", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "_generate_one_section", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(pipeline, "_supplement", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(draft, "generate_en_abstract", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(draft, "generate_acknowledgement", lambda *_args, **_kwargs: "")
+    completed = pipeline.run()
+    assert completed["full_paper_pipeline"]["status"] == "completed_with_quality_blocks"
+    assert completed["word_status"] == "quality_blocked"

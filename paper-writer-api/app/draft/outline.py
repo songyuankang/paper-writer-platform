@@ -49,7 +49,8 @@ OUTLINE_MAX_TOKENS = 8000
 
 REPAIR_PROMPT = """上一轮输出未包含必需的 sections 字段或不符合指定章节结构。
 请严格按照指定 JSON Schema 返回。顶层必须包含 sections；不要返回 outline 或 chapters；
-不要输出解释文字；只返回合法 JSON。"""
+不要输出解释文字；只返回合法 JSON。对于实证研究，第一章只能安排研究背景、研究现状、
+研究意义和研究思路；不得把研究假设、数据变量、模型设定、回归实证、异质性、结论或政策建议提前放入第一章。"""
 
 
 def _section_node_schema(level: int) -> dict:
@@ -327,16 +328,19 @@ def build_outline_with_meta(paper_info: dict, version: int = 1) -> tuple[list[di
                 logger.warning("AI 大纲第 %d 次生成异常：%s", attempt_count, exc)
                 flat, err = None, str(exc)
             if flat is not None:
-                logger.info("AI 大纲生成成功：章节数量=%d，尝试次数=%d", len(flat), attempt_count)
                 meta = evaluate_outline(paper_info, flat, source="ai", version=version)
-                meta.update({
-                    "attempt_count": attempt_count,
-                    "first_failure_reason": first_failure_reason,
-                    "second_failure_reason": second_failure_reason,
-                    "structured_output_used": structured_output_used,
-                    "normalization_applied": normalization_applied,
-                })
-                return flat, meta
+                conflicts = meta.get("chapter_role_conflicts") or []
+                if not conflicts:
+                    logger.info("AI 大纲生成成功：章节数量=%d，尝试次数=%d", len(flat), attempt_count)
+                    meta.update({
+                        "attempt_count": attempt_count,
+                        "first_failure_reason": first_failure_reason,
+                        "second_failure_reason": second_failure_reason,
+                        "structured_output_used": structured_output_used,
+                        "normalization_applied": normalization_applied,
+                    })
+                    return flat, meta
+                err = "第一章职责冲突：研究设计、实证或结论主体不得提前放入绪论"
             if attempt == 0:
                 first_failure_reason = err or "模型输出无法解析为合格的 JSON 大纲"
             else:

@@ -110,6 +110,49 @@ def _metric_hint(text: str) -> str:
     return "已核验指标"
 
 
+_TOPIC_TERMS = (
+    "共同富裕", "第三次分配", "居民收入", "收入差距", "收入分配", "基尼", "泰尔",
+    "慈善", "公益", "区域异质性", "调节效应", "中介效应", "实证", "面板", "回归",
+    "智能传感", "传感器", "网络安全", "异常检测", "目标检测", "边缘计算", "深度学习",
+)
+_TOPIC_SYNONYMS = {
+    "共同富裕": ("common prosperity",), "第三次分配": ("third distribution",),
+    "居民收入": ("household income",), "收入差距": ("income inequality", "income gap"),
+    "慈善": ("charity", "philanthropy"), "公益": ("charity", "philanthropy"),
+    "智能传感": ("sensor", "sensing"), "传感器": ("sensor",),
+    "网络安全": ("network security", "cybersecurity"), "异常检测": ("anomaly detection",),
+    "目标检测": ("object detection",), "边缘计算": ("edge computing",), "深度学习": ("deep learning",),
+}
+
+
+def _topic_terms(draft: dict[str, Any]) -> list[str]:
+    """从当前任务题目与关键词中取得可解释的主题词，不使用模型猜测。"""
+    text = " ".join([
+        str(draft.get("title") or ""),
+        *[str(item) for item in (draft.get("keywords") or {}).get("zh", [])],
+        *[str(item) for item in (draft.get("meta") or {}).get("keywords", [])],
+    ])
+    terms = [term for term in _TOPIC_TERMS if term.lower() in text.lower()]
+    expanded = [alias for term in terms for alias in _TOPIC_SYNONYMS.get(term, ())]
+    return list(dict.fromkeys([*terms, *expanded]))
+
+
+def _first_sentence(value: object, limit: int = 110) -> str:
+    text = _clean(value, 800)
+    if not text:
+        return "未提供可核验摘要结论"
+    parts = re.split(r"(?<=[。！？.!?])\s*", text, maxsplit=1)
+    return _clean(parts[0], limit)
+
+
+def _method_from_abstract(value: object) -> str:
+    text = _clean(value, 1200)
+    for token, label in (("面板", "面板数据分析"), ("回归", "回归分析"), ("问卷", "问卷调查"), ("案例", "案例研究"), ("实证", "实证研究"), ("综述", "文献综述")):
+        if token in text:
+            return label
+    return "摘要未明确研究方法"
+
+
 class ResearchVisualizationService:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -149,6 +192,47 @@ class ResearchVisualizationService:
         if not service.load():
             raise ValueError("请先生成论文草稿，再生成可进入论文的图表或表格候选")
         return service
+
+    def _relevant_literature(self, task_id: str) -> list[tuple[dict[str, Any], list[str]]]:
+        """只保留至少命中一个任务主题实体的文献，禁止 task-level 全量兜底。"""
+        draft = self._draft_service(task_id).load()
+        terms = _topic_terms(draft)
+        if not terms:
+            return []
+        scored: list[tuple[int, dict[str, Any], list[str]]] = []
+        for item in self.literature.list(task_id):
+            haystack = " ".join([
+                str(item.get("title") or ""), str(item.get("abstract") or ""),
+                str(item.get("journal") or ""), " ".join(str(value) for value in item.get("keywords") or []),
+            ]).lower()
+            matched = [term for term in terms if term.lower() in haystack]
+            if matched:
+                title_hits = sum(term.lower() in str(item.get("title") or "").lower() for term in matched)
+                scored.append((len(matched) * 10 + title_hits * 5, item, matched))
+        scored.sort(key=lambda value: (-value[0], str(value[1].get("year") or ""), str(value[1].get("title") or "")))
+        return [(item, matched) for _, item, matched in scored[:10]]
+
+    @staticmethod
+    def _literature_review_table(records: list[tuple[dict[str, Any], list[str]]]) -> dict[str, Any]:
+        rows: list[list[str]] = []
+        for item, matched in records:
+            authors = [str(value) for value in item.get("authors") or [] if str(value).strip()]
+            author_year = (authors[0] + (" 等" if len(authors) > 1 else "") if authors else "匿名") + f"（{item.get('year') or 'n.d.'}）"
+            topic = "、".join(matched) or _clean(item.get("title"), 70)
+            abstract = str(item.get("abstract") or "")
+            rows.append([
+                author_year,
+                topic,
+                _clean(item.get("research_object"), 80) or "摘要未明确研究对象",
+                _method_from_abstract(abstract),
+                _first_sentence(abstract, 110),
+                "为本文“" + "、".join(matched[:3]) + "”分析提供相关文献依据",
+            ])
+        return {
+            "type": "table", "title": "文献综述表",
+            "headers": ["作者/年份", "研究主题", "研究对象", "研究方法", "核心结论", "与本文关系"],
+            "rows": rows,
+        }
 
     @staticmethod
     def _rule_queries(topic: str, chapter: str, question: str) -> list[str]:
@@ -461,11 +545,10 @@ class ResearchVisualizationService:
             self._write(self._candidate_path(candidate["id"]), candidate)
             candidates.append(candidate)
         if not candidates and include_literature_fallback and len(evidence) < 2:
-            literature = self.literature.list(task_id)
-            if len(literature) >= 2:
-                records = literature[:10]
-                table = {"type": "table", "title": "文献综述表", "headers": ["文献", "年份", "来源", "摘要信息"], "rows": [[item.get("title"), item.get("year") or "", item.get("journal") or item.get("source"), _clean(item.get("abstract"), 220)] for item in records]}
-                candidate = {"id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240), "kind": "table", "table_type": "literature_review", "title": "文献综述表", "reason": "已有多篇已保存文献，适合以可追溯的文献综述表呈现。", "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [], "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item in records], "created_at": _now(), "updated_at": _now()}
+            relevant_records = self._relevant_literature(task_id)
+            if len(relevant_records) >= 2:
+                table = self._literature_review_table(relevant_records)
+                candidate = {"id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240), "kind": "table", "table_type": "literature_review", "title": "文献综述表", "reason": "仅汇总与当前论文题目实体匹配的已保存文献，适合以可追溯的论文式综述表呈现。", "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [], "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item, _ in relevant_records], "created_at": _now(), "updated_at": _now()}
                 self._write(self._candidate_path(candidate["id"]), candidate)
                 candidates.append(candidate)
         if dataset_id:
@@ -491,19 +574,16 @@ class ResearchVisualizationService:
     def recommend_literature_review(self, *, task_id: str, section: str = "") -> list[dict[str, Any]]:
         """Create only the source-backed literature review table candidate."""
         task_id = _task_id(task_id)
-        records = self.literature.list(task_id)[:10]
+        records = self._relevant_literature(task_id)
         if len(records) < 2:
             return []
-        table = {
-            "type": "table", "title": "文献综述表", "headers": ["文献", "年份", "来源", "摘要信息"],
-            "rows": [[item.get("title"), item.get("year") or "", item.get("journal") or item.get("source"), _clean(item.get("abstract"), 220)] for item in records],
-        }
+        table = self._literature_review_table(records)
         candidate = {
             "id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240),
             "kind": "table", "table_type": "literature_review", "title": "文献综述表",
             "reason": "已保存文献仅在文献综述/研究现状章节中汇总为可追溯表格。",
             "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [],
-            "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item in records],
+            "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item, _ in records],
             "created_at": _now(), "updated_at": _now(),
         }
         self._write(self._candidate_path(candidate["id"]), candidate)
@@ -519,7 +599,7 @@ class ResearchVisualizationService:
         """
         task_id = _task_id(task_id)
         records = []
-        for item in self.literature.list(task_id):
+        for item, _ in self._relevant_literature(task_id):
             try:
                 year = int(item.get("year"))
             except (TypeError, ValueError):
@@ -557,6 +637,15 @@ class ResearchVisualizationService:
             "source_title": item.get("title"), "source_updated_at": item.get("updated_at"),
             "verification_status": VERIFIED,
         } for item in sources]
+        provenance_note = "来源：已保存文献元数据；按年份字段确定性聚合。"
+        block.setdefault("chart_spec", {}).setdefault("provenance", {}).update({
+            "status": "derived_literature_metadata",
+            "source_note": provenance_note,
+            "derivation": "按已保存文献元数据年份字段计数",
+        })
+        block["caption"] = provenance_note
+        if isinstance(block.get("chart"), dict):
+            block["chart"]["caption"] = provenance_note
         block["research_visualization"] = {
             "kind": "literature_metadata_chart",
             "source_snapshot": snapshot,
@@ -602,6 +691,24 @@ class ResearchVisualizationService:
 
     def _source_literature_ids(self, candidate: dict[str, Any]) -> list[str]:
         return list(dict.fromkeys(str(item.get("source_id")) for item in candidate.get("source_snapshot") or [] if item.get("source_type") == "literature" and item.get("source_id")))
+
+    def _section_literature_ids(self, task_id: str, section_id: str) -> set[str]:
+        """返回目标正文节已可见引用的 Literature ID，用于表图共享来源去重。"""
+        draft = self._draft_service(task_id).load()
+        section = next((item for item in walk_sections(draft.get("sections") or []) if item.get("id") == section_id), None)
+        if not section:
+            return set()
+        records = {str(item.get("id")): item for item in self.literature.citations(task_id)}
+        values: set[str] = set()
+        for block in section.get("paragraphs") or []:
+            for part in block.get("content") or []:
+                if part.get("type") != "literature_citation":
+                    continue
+                record = records.get(str(part.get("citation_id") or "")) or {}
+                literature_id = str(record.get("literature_id") or "")
+                if literature_id:
+                    values.add(literature_id)
+        return values
 
     def insert(self, *, candidate_id: str, section_id: str, insert_index: int | None = None) -> dict[str, Any]:
         candidate = self._candidate(candidate_id)
@@ -659,8 +766,12 @@ class ResearchVisualizationService:
         else:
             raise ValueError("当前候选需要在 Visualization Lab 中完成数据绑定后再加入论文")
         citations = []
+        already_cited = self._section_literature_ids(task_id, section_id)
         for literature_id in self._source_literature_ids(candidate):
+            if literature_id in already_cited:
+                continue
             citations.append(self.literature.insert_citation(task_id=task_id, section_id=section_id, literature_id=literature_id))
+            already_cited.add(literature_id)
         candidate.update(status="inserted", inserted_block_ids=[block.get("id")], inserted_at=_now(), updated_at=_now())
         self._write(self._candidate_path(candidate_id), candidate)
         self.objects.sync(task_id)

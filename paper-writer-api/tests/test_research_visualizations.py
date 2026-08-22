@@ -147,3 +147,40 @@ def test_different_verified_metrics_generate_parameter_comparison_table(tmp_path
     assert table["title"] == "技术参数对比表"
     assert table["table_spec"]["headers"] == ["对象", "指标", "数值", "单位", "来源"]
     assert not any(item.get("kind") == "chart" for item in candidates)
+
+
+def test_literature_review_filters_topic_builds_paper_table_and_deduplicates_citations(tmp_path: Path):
+    settings = settings_for(tmp_path)
+    draft = DraftService(TASK, settings.output_dir / TASK)
+    draft.save({
+        "title": "共同富裕目标下第三次分配对居民收入差距的调节效应研究",
+        "meta": {"paper_type": "毕业论文", "keywords": ["共同富裕", "第三次分配"]},
+        "abstract": {"zh": "", "en": ""}, "keywords": {"zh": ["共同富裕", "第三次分配"], "en": []},
+        "acknowledgement": "", "references": [],
+        "sections": [{"id": "2-1", "number": "2.1", "title": "文献综述", "level": 2, "gist": "", "paragraphs": []}],
+    })
+    literature = LiteratureService(settings)
+    related = [
+        literature.save(task_id=TASK, metadata={"title": "共同富裕与第三次分配的收入差距效应", "authors": ["张三"], "year": 2021, "abstract": "本文采用省际面板回归分析第三次分配对居民收入差距的影响。", "source": "manual", "source_id": "related-1", "external_id": "related-1"}),
+        literature.save(task_id=TASK, metadata={"title": "慈善公益参与与共同富裕", "authors": ["李四", "王五"], "year": 2022, "abstract": "实证研究发现慈善公益有助于缩小收入差距。", "source": "manual", "source_id": "related-2", "external_id": "related-2"}),
+    ]
+    literature.save(task_id=TASK, metadata={"title": "花岗岩矿化机理", "authors": ["无关作者"], "year": 2020, "abstract": "研究花岗岩矿化过程与地球化学特征。", "source": "manual", "source_id": "irrelevant", "external_id": "irrelevant"})
+    service = ResearchVisualizationService(settings)
+
+    table_candidate = service.recommend_literature_review(task_id=TASK, section="2.1 文献综述")[0]
+    assert table_candidate["table_spec"]["headers"] == ["作者/年份", "研究主题", "研究对象", "研究方法", "核心结论", "与本文关系"]
+    assert {item["source_id"] for item in table_candidate["source_snapshot"]} == {item["id"] for item in related}
+    assert all("花岗岩" not in " ".join(row) for row in table_candidate["table_spec"]["rows"])
+    assert all(len(row[4]) <= 110 for row in table_candidate["table_spec"]["rows"])
+
+    trend_candidate = service.recommend_literature_trend(task_id=TASK, section="2.1 文献综述")[0]
+    trend_spec = trend_candidate["chart"]["block_snapshot"]["chart_spec"]
+    assert trend_spec["provenance"]["status"] == "derived_literature_metadata"
+    assert trend_spec["provenance"]["source_note"] == "来源：已保存文献元数据；按年份字段确定性聚合。"
+
+    service.insert(candidate_id=table_candidate["id"], section_id="2-1")
+    service.insert(candidate_id=trend_candidate["id"], section_id="2-1")
+    blocks = draft.load()["sections"][0]["paragraphs"]
+    citation_blocks = [block for block in blocks if block.get("type") == "literature_citation"]
+    assert len(citation_blocks) == 2
+    assert len(literature.citations(TASK)) == 2

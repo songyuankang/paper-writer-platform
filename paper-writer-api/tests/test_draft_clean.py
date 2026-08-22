@@ -196,17 +196,28 @@ class TestGenerateSectionCleaning(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_mock_ai_multiple_paragraphs(self):
-        # H. mock AI 返回含标题的多段 → 拆成多个干净 paragraph
-        _generate(self.service,
-                  "## 测试小标题\n\n第一段正文[1]。\n\n第二段正文[2]。")
+        # H. 首次 Markdown 标题被阻断；受控重试返回正文后才写入。
+        with mock.patch.object(DraftService, "_model_ctx", return_value=nullcontext()), \
+             mock.patch("app.draft.service.deepseek.chat", side_effect=[
+                 "## 测试小标题\n\n第一段正文[1]。\n\n第二段正文[2]。",
+                 "第一段正文[1]。\n\n第二段正文[2]。",
+             ]) as chat:
+            _ = self.service.generate_section(_leaf_section(self.service)["id"], None)
         paras = _leaf_paragraphs(self.service)
+        self.assertEqual(chat.call_count, 2)
         self.assertEqual(len(paras), 2)
         self.assertEqual(paras[0]["text"], "第一段正文[1]。")
         self.assertEqual(paras[1]["text"], "第二段正文[2]。")
+        self.assertEqual(paras[0]["generation_quality"]["attempt_count"], 2)
 
     def test_no_heading_in_paragraph_text(self):
-        _generate(self.service, "## 小标题\n\n正文段落内容。")
+        with mock.patch.object(DraftService, "_model_ctx", return_value=nullcontext()), \
+             mock.patch("app.draft.service.deepseek.chat", side_effect=[
+                 "## 小标题\n\n正文段落内容。", "正文段落内容。"
+             ]):
+            result = self.service.generate_section(_leaf_section(self.service)["id"], None)
         paras = _leaf_paragraphs(self.service)
+        self.assertEqual(result["generation_quality"]["attempt_count"], 2)
         self.assertEqual(len(paras), 1)
         self.assertNotIn("##", paras[0]["text"])
         self.assertNotIn("小标题", paras[0]["text"])
@@ -243,17 +254,20 @@ class TestGenerateSectionCleaning(unittest.TestCase):
         all_ids = [p["id"] for p in paras2]
         self.assertEqual(len(set(all_ids)), len(all_ids))
 
-    def test_generation_failure_keeps_single_message(self):
+    def test_generation_failure_marks_section_without_persisting_error_text(self):
         from app.services import deepseek as ds
+        section_id = _leaf_section(self.service)["id"]
         with mock.patch.object(DraftService, "_model_ctx",
                                return_value=nullcontext()), \
              mock.patch("app.draft.service.deepseek.chat",
                         side_effect=ds.DeepSeekError("boom")):
-            self.service.generate_section(
-                _leaf_section(self.service)["id"], None)
+            result = self.service.generate_section(section_id, None)
         paras = _leaf_paragraphs(self.service)
-        self.assertEqual(len(paras), 1)
-        self.assertTrue(paras[0]["text"].startswith("（生成失败"))
+        section = next(item for item in self.service.load()["sections"] if item["id"] == section_id)
+        self.assertEqual(paras, [])
+        self.assertEqual(result["status"], "quality_blocked")
+        self.assertEqual(section["generation_status"], "quality_blocked")
+        self.assertEqual(section["generation_quality_issues"][0]["code"], "model_error")
 
     def test_generate_en_abstract_splits_keywords(self):
         # AI 返回 Abstract+Keywords 复合格式 → 摘要与关键词分开存储

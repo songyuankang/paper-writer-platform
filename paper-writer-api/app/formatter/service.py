@@ -12,9 +12,8 @@ from app.services import content_quality_guard, revise_service
 logger = logging.getLogger(__name__)
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
-# 临时开放导出：保留质量审计与规范化，但不再因 blockers 阻断 DOCX 输出。
-# 恢复门禁时将该开关改回 True。
-EXPORT_QUALITY_GATE_BLOCKING = False
+# 导出质量门禁默认阻断：任何 blocker 均保留在 export_guard.json 并禁止输出 DOCX。
+EXPORT_QUALITY_GATE_BLOCKING = True
 
 
 def spec_from_paper_content(paper_info: dict, content_dir: Path) -> dict:

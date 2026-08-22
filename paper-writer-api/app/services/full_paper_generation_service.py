@@ -370,7 +370,30 @@ class FullPaperGenerationService:
         if not self._checkpoint("generating_section", f"正在生成 {section.get('number', '')} {section.get('title', '')}", section_id=section_id, progress=10 + int(index / max(1, total) * 60)):
             return False
         before = {str(item.get("id")) for item in section.get("paragraphs") or []}
-        self.draft_service.generate_section(section_id, model_id)
+        generated = self.draft_service.generate_section(section_id, model_id)
+        if generated.get("status") == "quality_blocked":
+            with self.draft_service.lock:
+                draft = self.draft_service.load()
+                state = dict(self._state(draft))
+                blocked = list(state.get("quality_blocked_sections") or [])
+                blocked = [item for item in blocked if item.get("section_id") != section_id]
+                blocked.append({
+                    "section_id": section_id,
+                    "section_number": section.get("number"),
+                    "section_title": section.get("title"),
+                    "attempt_count": generated.get("attempt_count"),
+                    "issues": generated.get("quality_issues") or [],
+                    "at": _now(),
+                })
+                state["quality_blocked_sections"] = blocked
+                state.setdefault("errors", []).append({
+                    "section_id": section_id,
+                    "code": "generation_quality_blocked",
+                    "message": f"{section.get('number', '')} {section.get('title', '')} 的正文未通过质量检查。",
+                })
+                draft[PIPELINE_KEY] = state
+                self.draft_service.save(draft)
+            return True
         self._mark_new_paragraphs(section_id, before)
         if allow_research:
             self._execute_visualization_plan_for_section(section, model_id)
@@ -469,9 +492,20 @@ class FullPaperGenerationService:
             stats = self.draft_service._refresh_word_stats(draft)
             state = dict(self._state(draft))
             self.visualization_plan.sync_candidate_statuses(self.task_id, self.research.candidates(self.task_id))
-            state.update(status="completed", stage="completed", message="全文生成完成", completed_at=_now(), progress=100, visualization_plan=self.visualization_plan.summary(self.task_id))
+            quality_blocked = list(state.get("quality_blocked_sections") or [])
+            state.update(
+                status="completed_with_quality_blocks" if quality_blocked else "completed",
+                stage="quality_blocked" if quality_blocked else "completed",
+                message=("全文生成完成，但部分章节因正文质量问题未写入。" if quality_blocked else "全文生成完成"),
+                completed_at=_now(), progress=100,
+                visualization_plan=self.visualization_plan.summary(self.task_id),
+            )
             draft[PIPELINE_KEY] = state
-            draft.update(generating=False, progress=100 if stats["actual"] >= stats["minimum"] else 98, word_status="completed" if stats["actual"] >= stats["minimum"] else "shortfall")
+            draft.update(
+                generating=False,
+                progress=100 if stats["actual"] >= stats["minimum"] else 98,
+                word_status=("quality_blocked" if quality_blocked else ("completed" if stats["actual"] >= stats["minimum"] else "shortfall")),
+            )
             self.objects.renumber_document_references(self.task_id, draft)
             self.draft_service.save(draft)
         return self.draft_service.load()

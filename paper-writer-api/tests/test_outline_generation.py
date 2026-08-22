@@ -215,3 +215,57 @@ def test_real_title_e2e_second_attempt_sections_is_ai_customized(monkeypatch):
     assert meta["source"] == "ai"
     assert meta["attempt_count"] == 2
     assert meta["entity_coverage"] > 0
+
+
+def test_empirical_first_chapter_role_conflict_is_low_score_and_retried(monkeypatch):
+    paper = {
+        **PAPER,
+        "title": "共同富裕目标下第三次分配对居民收入差距的调节效应研究",
+        "keywords": ["共同富裕", "第三次分配", "收入差距"],
+    }
+    bad = {
+        "sections": [
+            {"title": "绪论", "level": 1, "children": [
+                {"title": "研究背景", "level": 2, "children": []},
+                {"title": "研究假设", "level": 2, "children": []},
+                {"title": "实证结果分析", "level": 2, "children": []},
+                {"title": "结论与政策建议", "level": 2, "children": []},
+            ]},
+            {"title": "理论机制", "level": 1, "children": []},
+            {"title": "研究设计", "level": 1, "children": []},
+            {"title": "实证检验", "level": 1, "children": []},
+        ],
+    }
+    good = {
+        "sections": [
+            {"title": "绪论", "level": 1, "children": [{"title": "研究背景与研究意义", "level": 2, "children": []}]},
+            {"title": "理论机制与研究假设", "level": 1, "children": []},
+            {"title": "研究设计与变量说明", "level": 1, "children": []},
+            {"title": "实证结果与稳健性检验", "level": 1, "children": []},
+            {"title": "结论与政策建议", "level": 1, "children": []},
+        ],
+    }
+    responses = iter([content(bad), content(good)])
+    monkeypatch.setattr(outline.deepseek, "is_enabled", lambda: True)
+    monkeypatch.setattr(outline.deepseek, "chat_json", lambda *_args, **_kwargs: (next(responses), True))
+    flat, meta = outline.build_outline_with_meta(paper)
+    assert meta["research_type"] == "empirical"
+    assert meta["attempt_count"] == 2
+    assert "第一章职责冲突" in meta["first_failure_reason"]
+    assert meta["chapter_role_conflicts"] == []
+    assert all(not (item["id"].startswith("1-") and item["title"] == "实证结果分析") for item in flat)
+
+
+def test_empirical_role_conflict_caps_quality_score():
+    sections = [
+        {"id": "1", "number": "第一章", "level": 1, "title": "绪论", "gist": ""},
+        {"id": "1-1", "number": "1.1", "level": 2, "title": "研究假设", "gist": ""},
+        {"id": "1-2", "number": "1.2", "level": 2, "title": "实证结果", "gist": ""},
+        {"id": "2", "number": "第二章", "level": 1, "title": "理论机制", "gist": ""},
+        {"id": "3", "number": "第三章", "level": 1, "title": "研究设计", "gist": ""},
+        {"id": "4", "number": "第四章", "level": 1, "title": "结论与政策建议", "gist": ""},
+    ]
+    meta = evaluate_outline({**PAPER, "title": "共同富裕与第三次分配的收入差距实证研究"}, sections, source="ai")
+    assert meta["research_type"] == "empirical"
+    assert meta["chapter_role_conflicts"]
+    assert meta["score"] <= 45

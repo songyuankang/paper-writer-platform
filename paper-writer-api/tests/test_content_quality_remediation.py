@@ -40,7 +40,7 @@ def test_export_guard_normalizes_reference_numbers_and_source_text(tmp_path: Pat
     assert normalized["sections"][1]["text"] == "数据来源：公开数据。"
 
 
-def test_format_service_temporarily_allows_bad_content_and_keeps_audit(tmp_path: Path) -> None:
+def test_format_service_blocks_bad_content_and_keeps_audit(tmp_path: Path) -> None:
     spec = {
         "meta": {"title": "测试", "abstract": "摘要", "keywords": ["测试"]},
         "sections": [
@@ -50,13 +50,14 @@ def test_format_service_temporarily_allows_bad_content_and_keeps_audit(tmp_path:
         ],
         "references": [],
     }
-    files = format_paper("guard-test", tmp_path, {"title": "测试"}, spec, build_docx=True)
+    with pytest.raises(content_quality_guard.ExportQualityError):
+        format_paper("guard-test", tmp_path, {"title": "测试"}, spec, build_docx=True)
     report = json.loads((tmp_path / "export_guard.json").read_text(encoding="utf-8"))
     assert (tmp_path / "export_guard.json").exists()
-    assert list(tmp_path.glob("*.docx"))
-    assert "export_guard.json" in files
-    assert report["blocking_enabled"] is False
-    assert report["bypassed_blockers"]
+    assert not list(tmp_path.glob("*.docx"))
+    assert report["blocking_enabled"] is True
+    assert report["blockers"]
+    assert "bypassed_blockers" not in report
 
 
 def test_export_guard_removes_unresolved_table_and_figure_references() -> None:
@@ -73,3 +74,23 @@ def test_export_guard_removes_unresolved_table_and_figure_references() -> None:
     assert "表5-1" not in normalized["sections"][0]["text"]
     assert "图3-1" not in normalized["sections"][0]["text"]
     assert "模型性能得到提升" in normalized["sections"][0]["text"]
+
+
+def test_export_guard_blocks_inline_markdown_and_recognizes_flat_figure_table_numbers() -> None:
+    clean_spec = {
+        "sections": [
+            {"type": "p", "text": "如表1所示，结果见图1。"},
+            {"type": "table", "title": "表1 文献综述表", "headers": ["a"], "rows": [["b"]]},
+            {"type": "figure", "title": "图1 已保存文献年度分布", "path": "assets/chart.png"},
+            {"type": "references", "items": []},
+        ],
+        "references": [],
+    }
+    _, report = content_quality_guard.prepare_spec_for_export(clean_spec)
+    assert report["table_numbers"] == ["1"]
+    assert report["figure_numbers"] == ["1"]
+    assert not any(item["code"].endswith("reference_not_resolved") for item in report["blockers"])
+
+    dirty_spec = {"sections": [{"type": "p", "text": "正文分析。 ## 3.3.2 重复标题"}], "references": []}
+    _, dirty_report = content_quality_guard.prepare_spec_for_export(dirty_spec)
+    assert any(item["code"] == "generated_body_markdown_heading" for item in dirty_report["blockers"])

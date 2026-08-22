@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+
+from app.draft.generation_quality import evaluate_generated_body
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +30,9 @@ _BLOCKED_TOKENS = (
 _MARKDOWN_ONLY = re.compile(r"^\s*(?:#{1,6}|```+|TODO|TBD)\s*$", re.IGNORECASE)
 _CITATION = re.compile(r"\[(\d+)\]")
 _REFERENCE_NUMBER = re.compile(r"^\s*\[(\d+)\]\s*")
-_TABLE_REFERENCE = re.compile(r"表(\d+-\d+)")
-_FIGURE_REFERENCE = re.compile(r"图(\d+-\d+)")
-_CAPTION_NUMBER = re.compile(r"^[图表](\d+-\d+)")
+_TABLE_REFERENCE = re.compile(r"表(\d+(?:-\d+)?)")
+_FIGURE_REFERENCE = re.compile(r"图(\d+(?:-\d+)?)")
+_CAPTION_NUMBER = re.compile(r"^[图表](\d+(?:-\d+)?)")
 
 
 def _section_text(section: dict[str, Any]) -> str:
@@ -112,6 +114,16 @@ def prepare_spec_for_export(spec: dict[str, Any]) -> tuple[dict[str, Any], dict[
                 "message": f"第 {index} 个内容块残留 Markdown/调试标记“{text}”。",
             })
         if section.get("type") == "p":
+            body_quality = evaluate_generated_body(text)
+            for issue in body_quality.get("issues") or []:
+                if issue.get("code") == "empty_body":
+                    continue
+                blockers.append({
+                    "code": f"generated_body_{issue.get('code')}",
+                    "section_index": index,
+                    "message": f"第 {index} 个正文块未通过生成质量检查：{issue.get('message')}",
+                    "sample": issue.get("sample"),
+                })
             section["text"] = (
                 text.replace("（示例数据，需替换为真实数据）。", "。")
                 .replace("（示例数据，需替换为真实数据）", "")
