@@ -22,6 +22,7 @@ from app.config import Settings, settings
 from app.draft import outline as outline_mod
 from app.draft.chart_runtime import now, recompute_chart_block, walk_sections
 from app.draft.generation_quality import GeneratedBodyQualityError, assert_generated_body
+from app.draft.outline_role_validator import OutlineRoleValidator
 from app.services.research_object_service import renumber_document_references
 from app.services.cross_reference_service import CrossReferenceService
 from app.services.dependency_graph_service import DependencyGraphService
@@ -290,9 +291,13 @@ class DraftService:
                     sections, outline_meta = outline_mod.build_outline_with_meta(paper_info)
             else:
                 sections, outline_meta = outline_mod.build_outline_with_meta(paper_info)
-            outline_meta["confirmation_required"] = require_confirmation
-            outline_meta["confirmed"] = not require_confirmation
-            if not require_confirmation:
+            role_validation = OutlineRoleValidator.validate(paper_info, sections)
+            outline_meta["role_validation"] = role_validation
+            outline_meta["role_repair_attempts"] = 0
+            outline_meta["role_base_confirmation_required"] = require_confirmation
+            outline_meta["confirmation_required"] = require_confirmation or role_validation["requires_repair"]
+            outline_meta["confirmed"] = not outline_meta["confirmation_required"]
+            if not outline_meta["confirmation_required"]:
                 outline_meta["confirmed_at"] = "legacy_or_direct_build"
             target_body_chars = max(int(paper_info.get("word_count", 3000)), 500)
             _apply_leaf_budgets(sections, target_body_chars)
@@ -336,12 +341,89 @@ class DraftService:
     def ensure_outline_confirmed(self) -> None:
         meta = self.outline_meta()
         if meta.get("confirmation_required") and not meta.get("confirmed"):
+            role = meta.get("role_validation") or {}
+            if role.get("requires_user_confirmation"):
+                raise ValueError("大纲章节职责异常；请在大纲确认页核对后明确确认，或重新生成目录。")
             raise ValueError("请先在大纲确认页核对并确认目录后，再生成正文。")
+
+    def validate_outline_roles_before_full_generation(self, model_id: str | None = None) -> dict:
+        """全文启动前的唯一职责校验入口。
+
+        首次发现严重职责异常时仅自动修复一次；修复后仍异常则写回可解释状态，
+        由用户在大纲确认页显式确认，禁止悄然继续全文生成。
+        """
+        with self.lock:
+            draft = self.load()
+            paper_info = self._paper_info(draft)
+            meta = dict(draft.get("outline_meta") or {})
+            validation = OutlineRoleValidator.validate(paper_info, draft.get("sections") or [])
+            previous = dict(meta.get("role_validation") or {})
+            if validation["valid"] or not validation["requires_repair"] or previous.get("user_confirmed"):
+                validation["user_confirmed"] = bool(previous.get("user_confirmed"))
+                meta["role_validation"] = validation
+                draft["outline_meta"] = meta
+                self.save(draft)
+                status = "valid" if validation["valid"] else ("user_confirmed" if previous.get("user_confirmed") else "warning")
+                return {"status": status, "validation": validation}
+
+            attempts = int(meta.get("role_repair_attempts") or 0)
+            if attempts < 1:
+                repair_info = dict(paper_info)
+                original = str(repair_info.get("special_requirements") or "")
+                repair_info["special_requirements"] = (original + "\n" + OutlineRoleValidator.repair_instruction(validation)).strip()
+                version = int(meta.get("version") or 1) + 1
+                ctx = self._model_ctx(model_id)
+                if ctx:
+                    with ctx:
+                        sections, repaired_meta = outline_mod.build_outline_with_meta(repair_info, version=version)
+                else:
+                    sections, repaired_meta = outline_mod.build_outline_with_meta(repair_info, version=version)
+                repaired_validation = OutlineRoleValidator.validate(paper_info, sections)
+                repaired_meta["role_validation"] = repaired_validation
+                repaired_meta["role_repair_attempts"] = 1
+                repaired_meta["role_base_confirmation_required"] = bool(meta.get("role_base_confirmation_required", meta.get("confirmation_required", False)))
+                repaired_meta["role_repaired_at"] = now()
+                if repaired_validation["valid"]:
+                    _apply_leaf_budgets(sections, int(paper_info["word_count"]))
+                    repaired_meta["confirmation_required"] = repaired_meta["role_base_confirmation_required"]
+                    repaired_meta["confirmed"] = not repaired_meta["confirmation_required"]
+                    if repaired_meta["confirmed"]:
+                        repaired_meta["confirmed_at"] = "role_repair_validated"
+                    draft["sections"] = sections
+                    draft["outline_meta"] = repaired_meta
+                    draft["total"] = len(_leaf_ids(sections))
+                    draft["done"] = 0
+                    draft["progress"] = 0
+                    self.save(draft)
+                    return {"status": "repaired", "validation": repaired_validation}
+                meta = repaired_meta
+                draft["sections"] = sections
+                draft["total"] = len(_leaf_ids(sections))
+
+            validation = meta.get("role_validation") or validation
+            validation["requires_user_confirmation"] = True
+            meta["role_validation"] = validation
+            meta["role_repair_attempts"] = max(1, int(meta.get("role_repair_attempts") or 0))
+            meta["confirmation_required"] = True
+            meta["confirmed"] = False
+            meta["role_repair_failed"] = True
+            draft["outline_meta"] = meta
+            self.save(draft)
+            raise ValueError("大纲职责校验连续两次未通过；请在大纲确认页调整目录后明确确认，系统不会自动生成全文。")
 
     def confirm_outline(self) -> dict:
         with self.lock:
             draft = self.load()
             meta = dict(draft.get("outline_meta") or {})
+            paper_info = self._paper_info(draft)
+            validation = OutlineRoleValidator.validate(paper_info, draft.get("sections") or [])
+            previous = dict(meta.get("role_validation") or {})
+            validation["user_confirmed"] = bool(validation["requires_user_confirmation"])
+            if validation["requires_user_confirmation"]:
+                validation["user_confirmation_note"] = "用户在大纲确认页确认带职责风险的目录。"
+            elif previous.get("user_confirmed"):
+                validation["user_confirmed"] = True
+            meta["role_validation"] = validation
             meta["confirmation_required"] = True
             meta["confirmed"] = True
             from datetime import datetime, timezone
@@ -365,6 +447,12 @@ class DraftService:
             else:
                 sections, meta = outline_mod.build_outline_with_meta(paper_info, version=version)
             _apply_leaf_budgets(sections, int(paper_info["word_count"]))
+            role_validation = OutlineRoleValidator.validate(paper_info, sections)
+            meta["role_validation"] = role_validation
+            meta["role_repair_attempts"] = 0
+            meta["role_base_confirmation_required"] = True
+            meta["confirmation_required"] = True
+            meta["confirmed"] = False
             draft["sections"] = sections
             draft["outline_meta"] = meta
             draft["total"] = len(_leaf_ids(sections))

@@ -639,7 +639,7 @@ export interface ReferenceCandidate { id:string; type:"figure"|"table"; title:st
 export interface DraftContentPart { type:"text"|"cross_reference"; text?:string; reference_id?:string; }
 export interface FullPaperPipelineState {
   version?: number;
-  status?: "running" | "pause_requested" | "paused" | "completed" | "failed" | "resuming";
+  status?: "running" | "pause_requested" | "paused" | "completed" | "completed_with_quality_blocks" | "failed" | "resuming";
   stage?: string;
   message?: string;
   current_section_id?: string;
@@ -764,6 +764,28 @@ export interface PaperDraft {
     score: number;
     issues: string[];
     recommendations: string[];
+    chapter_role_conflicts?: { section_id: string; number: string; title: string; matched_role: string }[];
+    role_repair_attempts?: number;
+    role_repair_failed?: boolean;
+    role_repaired_at?: string | null;
+    role_validation?: {
+      version?: number;
+      profile?: "technical" | "engineering" | "empirical" | "empirical_economics" | string;
+      valid: boolean;
+      requires_repair?: boolean;
+      requires_user_confirmation?: boolean;
+      user_confirmed?: boolean;
+      user_confirmation_note?: string;
+      covered_roles?: string[];
+      issues?: Array<{
+        code: string;
+        severity: "critical" | "high" | string;
+        message: string;
+        roles?: string[];
+        section_ids?: string[];
+        conflicts?: Array<{ section_id: string; number: string; title: string; matched_role: string }>;
+      }>;
+    };
     confirmation_required: boolean;
     confirmed: boolean;
     confirmed_at?: string | null;
@@ -773,7 +795,7 @@ export interface PaperDraft {
   progress: number;
   done: number;
   total: number;
-  word_status?: "generating" | "supplementing" | "completed" | "shortfall";
+  word_status?: "generating" | "supplementing" | "completed" | "shortfall" | "quality_blocked";
   supplement_rounds?: number;
   word_stats?: {
     target: number;

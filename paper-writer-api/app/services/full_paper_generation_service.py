@@ -75,6 +75,9 @@ class FullPaperGenerationService:
             return current
 
     def start(self, model_id: str | None = None, *, resume: bool = False) -> dict:
+        if not resume:
+            # 在任何全文状态或研究插入前验证目录职责；必要时仅进行一次受控目录修复。
+            self.draft_service.validate_outline_roles_before_full_generation(model_id)
         with self.draft_service.lock:
             draft = self.draft_service.load()
             if not draft:
