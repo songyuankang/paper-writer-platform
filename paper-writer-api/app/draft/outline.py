@@ -6,6 +6,7 @@ AI 输出始终先规范化为内部大纲契约。无法生成合格 AI 大纲�
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 import re
@@ -37,11 +38,22 @@ OUTLINE_RESPONSE_FORMAT = {
             "properties": {
                 "title": {"type": "string"},
                 "research_paradigm": {"type": "string"},
-                "sections": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/section"}},
+                "sections": {"type": "array", "minItems": 4, "items": {"$ref": "#/$defs/root_section"}},
             },
             "required": ["title", "research_paradigm", "sections"],
             "additionalProperties": False,
             "$defs": {
+                "root_section": {
+                    "allOf": [
+                        {"$ref": "#/$defs/section"},
+                        {
+                            "properties": {
+                                "level": {"const": 1},
+                                "children": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/section"}},
+                            }
+                        }
+                    ]
+                },
                 "section": {
                     "type": "object",
                     "properties": {
@@ -60,6 +72,16 @@ OUTLINE_RESPONSE_FORMAT = {
     },
 }
 OUTLINE_ALIASES = ("sections", "outline", "chapters")
+
+
+def _response_format_for(paper_info: dict[str, Any]) -> dict[str, Any]:
+    """Keep strict graduation-thesis hierarchy constraints out of other paper types."""
+    response_format = deepcopy(OUTLINE_RESPONSE_FORMAT)
+    schema = response_format["json_schema"]["schema"]
+    if "毕业" not in str(paper_info.get("paper_type") or ""):
+        schema["properties"]["sections"]["minItems"] = 1
+        schema["properties"]["sections"]["items"] = {"$ref": "#/$defs/section"}
+    return response_format
 
 
 def _sub_chapters_for(title: str) -> list[str]:
@@ -107,8 +129,13 @@ def _extract_json(text: str) -> tuple[dict[str, Any] | None, str | None]:
     return None, f"JSON 解析失败: {last_error or '未找到 JSON 对象'}"
 
 
-def _canonical_section(node: Any, *, expected_level: int) -> tuple[dict[str, Any] | None, str | None]:
-    """把模型章节节点规范为内部 canonical node，而不猜测缺失写作内容。"""
+def _canonical_section(
+    node: Any,
+    *,
+    expected_level: int,
+    require_children: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """规范化章节并拒绝毕业论文缺失的一级章节 children。"""
     if not isinstance(node, dict):
         return None, "sections 中存在非对象章节"
     title = str(node.get("title") or "").strip()
@@ -130,10 +157,18 @@ def _canonical_section(node: Any, *, expected_level: int) -> tuple[dict[str, Any
         return None, f"章节「{title}」的 level 无效"
     if level < 1 or level > 3:
         return None, f"章节「{title}」的 level 必须在 1-3 之间"
+    if level != expected_level:
+        return None, f"章节「{title}」的 level 应为 {expected_level}，实际为 {level}"
+    if require_children and len(raw_children) < 2:
+        return None, f"毕业论文一级章节「{title}」至少需要 2 个二级小节 children"
 
     children: list[dict[str, Any]] = []
     for child in raw_children:
-        normalized, error = _canonical_section(child, expected_level=min(level + 1, 3))
+        normalized, error = _canonical_section(
+            child,
+            expected_level=min(level + 1, 3),
+            require_children=False,
+        )
         if error:
             return None, error
         assert normalized is not None
@@ -149,8 +184,12 @@ def _canonical_section(node: Any, *, expected_level: int) -> tuple[dict[str, Any
     }, None
 
 
-def _normalize_outline_payload(data: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
-    """兼容 ``sections``、``outline``、``chapters``，最终只输出 sections 契约。"""
+def _normalize_outline_payload(
+    data: dict[str, Any],
+    *,
+    paper_type: str = "",
+) -> tuple[dict[str, Any] | None, str | None]:
+    """兼容明确别名并对毕业论文强制非空二级 children。"""
     raw_sections: Any = None
     matched_alias: str | None = None
     for alias in OUTLINE_ALIASES:
@@ -163,9 +202,17 @@ def _normalize_outline_payload(data: dict[str, Any]) -> tuple[dict[str, Any] | N
         aliases = " / ".join(OUTLINE_ALIASES)
         return None, f"JSON 中缺少非空 {aliases} 数组"
 
+    is_graduation_thesis = "毕业" in paper_type
+    if is_graduation_thesis and len(raw_sections) < 4:
+        return None, "毕业论文至少需要 4 个一级章节"
+
     sections: list[dict[str, Any]] = []
     for node in raw_sections:
-        normalized, error = _canonical_section(node, expected_level=1)
+        normalized, error = _canonical_section(
+            node,
+            expected_level=1,
+            require_children=is_graduation_thesis,
+        )
         if error:
             return None, error
         assert normalized is not None
@@ -187,7 +234,7 @@ def _flatten(node: dict[str, Any], parent: str, idx: int, out: list[dict[str, An
         chapter_num = idx + 1
         number = f"第{CN_NUM[chapter_num] if chapter_num < len(CN_NUM) else chapter_num}章"
     else:
-        number = f"{parent}.{idx + 1}" if parent else str(idx + 1)
+        number = f"{parent.replace('-', '.')}.{idx + 1}" if parent else str(idx + 1)
     sid = f"{parent}-{idx + 1}" if parent else str(idx + 1)
     children = list(node.get("children") or [])
     out.append({
@@ -221,6 +268,8 @@ def _outline_user_prompt(paper_info: dict[str, Any], retry_reason: str | None = 
             "\n\n上一轮输出不符合大纲 JSON 契约，原因：" + retry_reason + "。"
             "请重新生成。只能返回一个 JSON 对象；不要 Markdown、解释或代码围栏。"
             "顶层必须有 sections 数组，每个章节必须包含 title、level、purpose、children。"
+            "毕业论文必须有 4—6 个一级章节；每个一级章节必须至少包含 2 个 level=2 的 children。"
+            "重要章节可继续使用 level=3 children 展开；不允许所有 children 为空，也不允许只返回章节标题列表。"
         )
     return user
 
@@ -234,7 +283,7 @@ def _request_ai_outline(paper_info: dict[str, Any], retry_reason: str | None = N
         return deepseek.chat(
             messages,
             max_tokens=OUTLINE_MAX_TOKENS,
-            response_format=OUTLINE_RESPONSE_FORMAT,
+            response_format=_response_format_for(paper_info),
         )
     except deepseek.DeepSeekModelError as exc:
         # A minority of OpenAI-compatible endpoints do not implement response_format.
@@ -251,7 +300,10 @@ def _ai_outline(paper_info: dict[str, Any], retry_reason: str | None = None) -> 
     if error:
         return None, error
     assert data is not None
-    canonical, error = _normalize_outline_payload(data)
+    canonical, error = _normalize_outline_payload(
+        data,
+        paper_type=str(paper_info.get("paper_type") or ""),
+    )
     if error:
         return None, error
     assert canonical is not None
@@ -292,11 +344,13 @@ def build_outline_with_meta(paper_info: dict[str, Any], version: int = 1) -> tup
             except Exception as exc:  # noqa: BLE001 - normalized into a controlled retry reason
                 flat, error = None, f"{type(exc).__name__}: {exc}"
             if flat is not None:
-                logger.info("AI 大纲生成成功：attempt=%d sections=%d", attempt, len(flat))
                 meta = evaluate_outline(paper_info, flat, source="ai", version=version)
-                meta["generation_attempts"] = attempt
-                meta["last_generation_error"] = None
-                return flat, meta
+                if meta.get("hierarchy_valid"):
+                    logger.info("AI 大纲生成成功：attempt=%d sections=%d", attempt, len(flat))
+                    meta["generation_attempts"] = attempt
+                    meta["last_generation_error"] = None
+                    return flat, meta
+                error = "；".join(meta.get("block_reasons") or []) or "大纲层级不足"
             last_error = error or "模型输出无法解析为合格 JSON 大纲"
             logger.warning("AI 大纲生成 attempt=%d 失败：%s", attempt, last_error)
     else:

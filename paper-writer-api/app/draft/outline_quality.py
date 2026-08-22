@@ -13,6 +13,7 @@ from typing import Any
 TECHNICAL_TERMS = (
     "算法", "模型", "深度学习", "机器学习", "神经网络", "检测", "识别",
     "剪枝", "量化", "嵌入式", "部署", "系统", "控制", "优化", "推理",
+    "区块链", "智能合约", "电子病历", "共享平台", "联盟链", "Hyperledger",
 )
 EMPIRICAL_ECONOMICS_TERMS = (
     "共同富裕", "第三次分配", "居民收入", "收入差距", "收入分配", "调节效应",
@@ -159,6 +160,75 @@ def _first_chapter_role_conflict(sections: list[dict[str, Any]], research_type: 
     return hits if len(hits) >= 2 else []
 
 
+def hierarchy_metrics(paper_info: dict[str, Any], sections: list[dict[str, Any]]) -> dict[str, Any]:
+    """Measure the flattened section hierarchy without redesigning its storage model.
+
+    Draft sections remain a flat list.  Parentage is encoded by the stable ID
+    prefix (``1`` → ``1-1`` → ``1-1-1``), which is also what the editor and
+    DOCX exporter consume.  A graduation thesis must provide concrete level-2
+    writing units for every chapter; level 3 is supported and reported, but is
+    only mandatory when a chapter is intentionally expanded that far.
+    """
+    rows = [item for item in sections if isinstance(item, dict) and str(item.get("id") or "")]
+    level_1 = [item for item in rows if int(item.get("level") or 1) == 1]
+    level_2 = [item for item in rows if int(item.get("level") or 1) == 2]
+    level_3 = [item for item in rows if int(item.get("level") or 1) == 3]
+    ids = {str(item.get("id")) for item in rows}
+    leaf_count = sum(
+        1 for section_id in ids
+        if not any(other_id.startswith(section_id + "-") for other_id in ids)
+    )
+    children_per_chapter: dict[str, int] = {}
+    chapters_without_children: list[dict[str, str]] = []
+    chapters_with_too_few_sections: list[dict[str, Any]] = []
+    for chapter in level_1:
+        chapter_id = str(chapter.get("id"))
+        direct_children = [
+            item for item in level_2
+            if str(item.get("id") or "").rsplit("-", 1)[0] == chapter_id
+        ]
+        count = len(direct_children)
+        children_per_chapter[chapter_id] = count
+        if count == 0:
+            chapters_without_children.append({"id": chapter_id, "title": str(chapter.get("title") or "")})
+        if count < 2:
+            chapters_with_too_few_sections.append({
+                "id": chapter_id,
+                "title": str(chapter.get("title") or ""),
+                "children_count": count,
+            })
+
+    paper_type = str(paper_info.get("paper_type") or "")
+    is_graduation_thesis = "毕业" in paper_type
+    hierarchy_valid = True
+    reasons: list[str] = []
+    if is_graduation_thesis:
+        if len(level_1) < 4:
+            hierarchy_valid = False
+            reasons.append("毕业论文至少需要 4 个一级章节。")
+        if len(level_2) == 0:
+            hierarchy_valid = False
+            reasons.append("毕业论文缺少二级小节，不能把一级章节直接作为正文写作单元。")
+        if chapters_without_children:
+            hierarchy_valid = False
+            reasons.append("存在没有二级小节的一级章节。")
+        if chapters_with_too_few_sections:
+            hierarchy_valid = False
+            reasons.append("毕业论文每个一级章节至少需要 2 个二级小节。")
+    return {
+        "level_1_count": len(level_1),
+        "level_2_count": len(level_2),
+        "level_3_count": len(level_3),
+        "leaf_count": leaf_count,
+        "children_per_chapter": children_per_chapter,
+        "chapters_without_children": chapters_without_children,
+        "chapters_with_too_few_sections": chapters_with_too_few_sections,
+        "hierarchy_valid": hierarchy_valid,
+        "is_graduation_thesis": is_graduation_thesis,
+        "hierarchy_reasons": reasons,
+    }
+
+
 def _score(structure_score: float, entity_coverage: float, paradigm_score: float,
            role_score: float, specificity_score: float, source: str) -> int:
     if source != "ai":
@@ -184,6 +254,7 @@ def evaluate_outline(
     titles = [str(item.get("title") or "") for item in sections]
     joined = _norm(" ".join(_section_text(item) for item in sections))
     top_sections = [item for item in sections if int(item.get("level") or 1) == 1]
+    hierarchy = hierarchy_metrics(paper_info, sections)
     groups = REQUIRED_GROUPS[research_type]
     coverage: dict[str, bool] = {
         key: any(_norm(term) in joined for term in terms)
@@ -214,6 +285,9 @@ def evaluate_outline(
     if len(top_sections) < 3:
         issues.append("一级章节数量不足 3 个。")
         block_reasons.append("大纲结构不完整，至少需要 3 个一级章节。")
+    if not hierarchy["hierarchy_valid"]:
+        issues.extend(hierarchy["hierarchy_reasons"])
+        block_reasons.append("大纲层级不足，请重新生成大纲。")
     if not title_entities:
         issues.append("未能从题目识别可核验的研究实体。")
         block_reasons.append("题目实体无法识别，请检查论文标题。")
@@ -259,6 +333,14 @@ def evaluate_outline(
         "research_paradigm": research_type,
         "required_elements": required_elements(research_type),
         "coverage": coverage,
+        "level_1_count": hierarchy["level_1_count"],
+        "level_2_count": hierarchy["level_2_count"],
+        "level_3_count": hierarchy["level_3_count"],
+        "leaf_count": hierarchy["leaf_count"],
+        "children_per_chapter": hierarchy["children_per_chapter"],
+        "chapters_without_children": hierarchy["chapters_without_children"],
+        "chapters_with_too_few_sections": hierarchy["chapters_with_too_few_sections"],
+        "hierarchy_valid": hierarchy["hierarchy_valid"],
         "title_entities": title_entities,
         "matched_entities": matched_entities,
         "entity_coverage": entity_coverage,
