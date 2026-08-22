@@ -32,6 +32,7 @@ from app.draft.service import DraftService
 from app.services import deepseek
 from app.services.dataset_service import DatasetService
 from app.services.dependency_graph_service import DependencyGraphService
+from app.services.literature_relevance_service import rank_literature
 from app.services.literature_service import LiteratureSearchService, LiteratureService
 from app.services.model_service import resolve_model
 from app.services.research_object_service import ResearchObjectService
@@ -193,29 +194,40 @@ class ResearchVisualizationService:
             raise ValueError("请先生成论文草稿，再生成可进入论文的图表或表格候选")
         return service
 
-    def _relevant_literature(self, task_id: str) -> list[tuple[dict[str, Any], list[str]]]:
-        """只保留至少命中一个任务主题实体的文献，禁止 task-level 全量兜底。"""
+    def _literature_review_selection(self, task_id: str, section: str = "") -> dict[str, Any]:
+        """对全部已保存 Literature 执行多维评分，不以保存顺序或固定前十条兜底。"""
         draft = self._draft_service(task_id).load()
-        terms = _topic_terms(draft)
-        if not terms:
-            return []
-        scored: list[tuple[int, dict[str, Any], list[str]]] = []
-        for item in self.literature.list(task_id):
-            haystack = " ".join([
-                str(item.get("title") or ""), str(item.get("abstract") or ""),
-                str(item.get("journal") or ""), " ".join(str(value) for value in item.get("keywords") or []),
-            ]).lower()
-            matched = [term for term in terms if term.lower() in haystack]
-            if matched:
-                title_hits = sum(term.lower() in str(item.get("title") or "").lower() for term in matched)
-                scored.append((len(matched) * 10 + title_hits * 5, item, matched))
-        scored.sort(key=lambda value: (-value[0], str(value[1].get("year") or ""), str(value[1].get("title") or "")))
-        return [(item, matched) for _, item, matched in scored[:10]]
+        records = self.literature.list(task_id)
+        evidence_by_literature = {str(item.get("id") or ""): self.literature.evidence(str(item.get("id") or "")) for item in records}
+        selection = rank_literature(
+            records, draft=draft, evidence_by_literature=evidence_by_literature,
+            chapter_purpose=section, limit=10,
+        )
+        # 保留不含摘要全文的审计摘要，便于解释候选为何入选或被排除。
+        audit = {
+            "task_id": task_id,
+            "section": _clean(section, 240),
+            "context": selection["context"],
+            "candidate_count": selection["candidate_count"],
+            "accepted_count": selection["accepted_count"],
+            "minimum_required": selection["minimum_required"],
+            "sufficient": selection["sufficient"],
+            "accepted": [{"literature_id": item["assessment"]["literature_id"], **item["assessment"]} for item in selection["accepted"]],
+            "rejected": [{"literature_id": item["assessment"]["literature_id"], **item["assessment"]} for item in selection["rejected"]],
+            "updated_at": _now(),
+        }
+        self._write(self.root / "literature_review_selection" / f"{task_id}.json", audit)
+        return selection
+
+    def _relevant_literature(self, task_id: str, section: str = "") -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        selection = self._literature_review_selection(task_id, section)
+        return [(item["record"], item["assessment"]) for item in selection["accepted"]]
 
     @staticmethod
-    def _literature_review_table(records: list[tuple[dict[str, Any], list[str]]]) -> dict[str, Any]:
+    def _literature_review_table(records: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
         rows: list[list[str]] = []
-        for item, matched in records:
+        for item, assessment in records:
+            matched = list(assessment.get("matched_entities") or [])
             authors = [str(value) for value in item.get("authors") or [] if str(value).strip()]
             author_year = (authors[0] + (" 等" if len(authors) > 1 else "") if authors else "匿名") + f"（{item.get('year') or 'n.d.'}）"
             topic = "、".join(matched) or _clean(item.get("title"), 70)
@@ -545,10 +557,11 @@ class ResearchVisualizationService:
             self._write(self._candidate_path(candidate["id"]), candidate)
             candidates.append(candidate)
         if not candidates and include_literature_fallback and len(evidence) < 2:
-            relevant_records = self._relevant_literature(task_id)
-            if len(relevant_records) >= 2:
+            selection = self._literature_review_selection(task_id, section)
+            relevant_records = [(item["record"], item["assessment"]) for item in selection["accepted"]]
+            if selection["sufficient"]:
                 table = self._literature_review_table(relevant_records)
-                candidate = {"id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240), "kind": "table", "table_type": "literature_review", "title": "文献综述表", "reason": "仅汇总与当前论文题目实体匹配的已保存文献，适合以可追溯的论文式综述表呈现。", "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [], "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item, _ in relevant_records], "created_at": _now(), "updated_at": _now()}
+                candidate = {"id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240), "kind": "table", "table_type": "literature_review", "title": "文献综述表", "reason": "仅汇总经主题、来源质量与证据完整性评分后入选的文献；相关文献不足时不补入无关资料。", "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [], "literature_relevance": {"accepted_count": selection["accepted_count"], "candidate_count": selection["candidate_count"], "minimum_required": selection["minimum_required"], "context": selection["context"], "items": [assessment for _, assessment in relevant_records]}, "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item, _ in relevant_records], "created_at": _now(), "updated_at": _now()}
                 self._write(self._candidate_path(candidate["id"]), candidate)
                 candidates.append(candidate)
         if dataset_id:
@@ -574,15 +587,17 @@ class ResearchVisualizationService:
     def recommend_literature_review(self, *, task_id: str, section: str = "") -> list[dict[str, Any]]:
         """Create only the source-backed literature review table candidate."""
         task_id = _task_id(task_id)
-        records = self._relevant_literature(task_id)
-        if len(records) < 2:
+        selection = self._literature_review_selection(task_id, section)
+        if not selection["sufficient"]:
             return []
+        records = [(item["record"], item["assessment"]) for item in selection["accepted"]]
         table = self._literature_review_table(records)
         candidate = {
             "id": f"rv_{uuid.uuid4().hex[:16]}", "task_id": task_id, "section_hint": _clean(section, 240),
             "kind": "table", "table_type": "literature_review", "title": "文献综述表",
-            "reason": "已保存文献仅在文献综述/研究现状章节中汇总为可追溯表格。",
+            "reason": "仅汇总经主题、来源质量与证据完整性评分后入选的文献；相关文献不足时不生成综述表。",
             "status": "ready", "requires_confirmation": True, "table_spec": table, "evidence_ids": [],
+            "literature_relevance": {"accepted_count": selection["accepted_count"], "candidate_count": selection["candidate_count"], "minimum_required": selection["minimum_required"], "context": selection["context"], "items": [assessment for _, assessment in records]},
             "source_snapshot": [{"source_type": "literature", "source_id": item["id"], "source_title": item.get("title"), "source_updated_at": item.get("updated_at"), "verification_status": VERIFIED} for item, _ in records],
             "created_at": _now(), "updated_at": _now(),
         }
@@ -598,8 +613,11 @@ class ResearchVisualizationService:
         snapshot of the individual source records that contributed to it.
         """
         task_id = _task_id(task_id)
+        selection = self._literature_review_selection(task_id, section)
+        if not selection["sufficient"]:
+            return []
         records = []
-        for item, _ in self._relevant_literature(task_id):
+        for item, _ in [(value["record"], value["assessment"]) for value in selection["accepted"]]:
             try:
                 year = int(item.get("year"))
             except (TypeError, ValueError):

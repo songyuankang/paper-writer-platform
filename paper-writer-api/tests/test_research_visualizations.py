@@ -184,3 +184,31 @@ def test_literature_review_filters_topic_builds_paper_table_and_deduplicates_cit
     citation_blocks = [block for block in blocks if block.get("type") == "literature_citation"]
     assert len(citation_blocks) == 2
     assert len(literature.citations(TASK)) == 2
+
+
+def test_literature_review_does_not_pad_when_related_sources_are_insufficient(tmp_path: Path):
+    import json
+
+    settings = settings_for(tmp_path)
+    draft = DraftService(TASK, settings.output_dir / TASK)
+    draft.save({
+        "title": "共同富裕目标下第三次分配对居民收入差距的调节效应研究",
+        "meta": {"paper_type": "毕业论文", "keywords": ["共同富裕", "第三次分配", "收入差距"], "research_question": "第三次分配与慈善公益如何影响收入差距？"},
+        "abstract": {"zh": "", "en": ""}, "keywords": {"zh": ["共同富裕", "第三次分配", "收入差距"], "en": []},
+        "acknowledgement": "", "references": [],
+        "sections": [{"id": "2-1", "number": "2.1", "title": "文献综述", "level": 2, "gist": "梳理第三次分配与收入差距的实证证据", "paragraphs": []}],
+    })
+    literature = LiteratureService(settings)
+    related = literature.save(task_id=TASK, metadata={"title": "共同富裕与第三次分配的收入差距效应", "authors": ["张三"], "year": 2023, "abstract": "采用实证方法检验第三次分配对收入差距的影响。", "keywords": ["共同富裕", "第三次分配"], "source": "crossref", "source_id": "related", "external_id": "related", "doi": "10.1000/related"})
+    for index, title in enumerate(["数字工程建设研究", "花岗岩矿化过程", "多民族文字识别方法", "休闲农业发展路径", "旅游空间规划"]):
+        literature.save(task_id=TASK, metadata={"title": title, "authors": ["无关作者"], "year": 2020 + index, "abstract": title + "的技术分析。", "keywords": [title], "source": "manual", "source_id": f"irrelevant-{index}", "external_id": f"irrelevant-{index}"})
+
+    service = ResearchVisualizationService(settings)
+    assert service.recommend_literature_review(task_id=TASK, section="2.1 文献综述：第三次分配与收入差距") == []
+    audit_path = settings.db_path.parent / "research_visualizations" / "literature_review_selection" / f"{TASK}.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit["accepted_count"] == 1
+    assert audit["sufficient"] is False
+    assert audit["accepted"][0]["literature_id"] == related["id"]
+    assert {item["literature_id"] for item in audit["rejected"]}.isdisjoint({related["id"]})
+    assert all(any("未命中任务主题实体" in reason for reason in item["rejection_reasons"]) for item in audit["rejected"])

@@ -313,7 +313,10 @@ class FullPaperGenerationService:
     def _execute_visualization_plan_for_section(self, section: dict, model_id: str | None) -> None:
         """Generate and insert only this section's planned, unique formal blocks."""
         section_id = str(section["id"])
-        section_label = f"{section.get('number', '')} {section.get('title', '')}".strip()
+        section_label = " ".join(value for value in [
+            f"{section.get('number', '')} {section.get('title', '')}".strip(),
+            str(section.get("gist") or "").strip(),
+        ] if value)
         items = self.visualization_plan.items_for_section(self.task_id, section_id)
         if not items:
             return
